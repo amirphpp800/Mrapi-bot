@@ -42,7 +42,7 @@ import { handleWireguardCallback, handleWireguardMyConfig } from './wg.js';
 // IMPORTANT: Set secrets in environment variables for production. The values
 // below are fallbacks to help local testing. Prefer configuring via `env`.
 // EDIT: TELEGRAM_TOKEN, ADMIN_IDS, ADMIN_KEY, WEBHOOK_URL, JOIN_CHAT
-const TELEGRAM_TOKEN = "7591077984:AAHOKK7fahjkCZZD-ggwOarbaKCGBUkV06A";
+const TELEGRAM_TOKEN = "7591077984:AAGIkAtFPz8Qp7vBBSDVOozNC5zZvZFQlKU";
 
 const ADMIN_IDS = []; // provide via env `ADMIN_IDS` (comma-separated)
 const ADMIN_KEY = ""; // provide via env `ADMIN_KEY`
@@ -4121,3 +4121,4 @@ async function ensureWebhookForRequest(env, req) {
 
 /* End of enhanced worker */
 }
+
