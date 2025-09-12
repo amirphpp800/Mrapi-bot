@@ -270,14 +270,39 @@ export default {
       return new Response('ok');
     }
 
-    // Enhanced main page with admin panel (GET only)
+    // Root page: Status only (no admin panel)
     if (url.pathname === '/' && request.method === 'GET') {
-      return handleMainPage(request, env, url, ctx);
-    }
+      // Gather lightweight status
+      const users = (await kvGetJson(env, 'index:users')) || [];
+      const enabled = (await kvGetJson(env, 'bot:enabled')) ?? true;
+      const lastWebhookAt = (await kvGetJson(env, 'bot:last_webhook')) || 0;
+      const connected = typeof lastWebhookAt === 'number' && (now() - lastWebhookAt) < 5 * 60 * 1000;
+      const settings = await getSettings(env);
+      const webhookInfo = await tgGetWebhookInfo();
+      const desiredWebhook = (RUNTIME.webhookUrl || WEBHOOK_URL || url.origin || '');
 
-    // New dedicated Admin UI
-    if (url.pathname === '/admin' && request.method === 'GET') {
-      return handleAdminPage(request, env, url, ctx);
+      const row = (k, v) => `<tr><td style="padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:right">${k}</td><td style="padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left">${v}</td></tr>`;
+      const html = `<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+      <title>وضعیت ربات</title>
+      <body style="margin:0;font-family:Segoe UI,Tahoma,Arial;background:#0b1220;color:#e5e7eb;">
+        <div style="max-width:860px;margin:0 auto;padding:24px">
+          <h1 style="margin:0 0 12px 0">📊 وضعیت کلی ربات</h1>
+          <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:16px;overflow:hidden">
+            <table style="width:100%;border-collapse:collapse">
+              ${row('سرویس', enabled ? '<span style="color:#22c55e">فعال</span>' : '<span style="color:#ef4444">غیرفعال</span>')}
+              ${row('کاربران', users.length.toLocaleString('fa-IR'))}
+              ${row('آخرین وبهوک', lastWebhookAt ? new Date(lastWebhookAt).toLocaleString('fa-IR') : '-')}
+              ${row('اتصال وبهوک', connected ? '<span style="color:#22c55e">آنلاین</span>' : '<span style="color:#ef4444">آفلاین</span>')}
+              ${row('Webhook مطلوب', desiredWebhook ? `<code>${desiredWebhook}</code>` : '-')}
+              ${row('Webhook فعلی تلگرام', (webhookInfo&&webhookInfo.result&&webhookInfo.result.url) ? `<code>${webhookInfo.result.url}</code>` : '-')}
+              ${row('هزینه‌ها (DNS/WG/OVPN)', `${settings.cost_dns}/${settings.cost_wg}/${settings.cost_ovpn}`)}
+              ${row('توکن تلگرام', (RUNTIME.tgToken||'').length ? '✅' : '❌')}
+            </table>
+          </div>
+          <div style="opacity:.75;margin-top:10px;font-size:.9rem">Health: <a href="/health" style="color:#6ea8fe">/health</a> — MiniApp: <a href="/miniapp" style="color:#6ea8fe">/miniapp</a></div>
+        </div>
+      </body></html>`;
+      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
 
     // Mini app public page (Top Referrers) — GET
@@ -287,9 +312,6 @@ export default {
 
     // File public link
     if (url.pathname.startsWith('/f/')) return handleFileDownload(request, env, url);
-
-    // API endpoints for admin panel
-    if (url.pathname.startsWith('/api/')) return handleApiRequest(request, env, url, ctx);
 
     // Health check
     if (url.pathname === '/health') return new Response('ok');
