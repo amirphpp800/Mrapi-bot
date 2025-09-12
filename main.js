@@ -920,6 +920,7 @@ async function buildMyFilesKeyboard(env, uid, page = 0, pageSize = 5) {
 }
 async function sendMainMenu(env, chatId, uid, opts = {}) {
   const skipJoin = !!opts.skipJoin;
+  const delayMs = Number.isFinite(opts.delayMs) ? Math.max(0, opts.delayMs) : 300;
   try {
     if (!skipJoin) {
       const requireJoin = await getRequiredChannels(env);
@@ -929,7 +930,20 @@ async function sendMainMenu(env, chatId, uid, opts = {}) {
       }
     }
   } catch (_) {}
-  await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: await buildDynamicMainMenu(env, uid) });
+
+  // Small delay to avoid potential flood or ordering issues
+  try { if (delayMs) await sleep(delayMs); } catch (_) {}
+
+  let menu;
+  try { menu = await buildDynamicMainMenu(env, uid); } catch (_) { menu = null; }
+
+  // Try sending with keyboard first, then fallback to plain text
+  try {
+    const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: menu || undefined });
+    if (!res || !res.ok) throw new Error('send_with_keyboard_failed');
+  } catch (_) {
+    await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید.' });
+  }
 }
 
 /* ==================== 9) Telegram webhook handling ==================== */
@@ -1006,8 +1020,8 @@ async function onMessage(msg, env) {
         return;
       }
     }
-    // Default: show main menu (with join check inside)
-    await sendMainMenu(env, chatId, uid);
+    // Default: show main menu (skip join check to ensure visibility)
+    await sendMainMenu(env, chatId, uid, { skipJoin: true });
     return;
   }
   // /update: simulate updating flow then show menu
