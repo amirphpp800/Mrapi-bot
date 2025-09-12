@@ -313,6 +313,22 @@ export default {
     // File public link
     if (url.pathname.startsWith('/f/')) return handleFileDownload(request, env, url);
 
+    // Diagnostic: send a test message (temporary). Usage: /diag-send?key=ADMIN_KEY&uid=123&text=hi
+    if (url.pathname === '/diag-send' && request.method === 'GET') {
+      const key = url.searchParams.get('key') || '';
+      const adminKey = (RUNTIME.adminKey || ADMIN_KEY || '').trim();
+      if (!adminKey || key !== adminKey) {
+        return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+      }
+      const uid = Number(url.searchParams.get('uid') || '');
+      const text = url.searchParams.get('text') || 'ping';
+      if (!Number.isFinite(uid) || uid <= 0) {
+        return new Response(JSON.stringify({ ok: false, error: 'bad uid' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+      const res = await tgApi('sendMessage', { chat_id: uid, text });
+      return new Response(JSON.stringify(res || { ok: false }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
     // Health check
     if (url.pathname === '/health') return new Response('ok');
 
