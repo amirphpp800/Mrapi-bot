@@ -918,12 +918,15 @@ async function buildMyFilesKeyboard(env, uid, page = 0, pageSize = 5) {
     : 'هنوز فایلی ندارید.';
   return { text, reply_markup: { inline_keyboard: rows } };
 }
-async function sendMainMenu(env, chatId, uid) {
+async function sendMainMenu(env, chatId, uid, opts = {}) {
+  const skipJoin = !!opts.skipJoin;
   try {
-    const requireJoin = await getRequiredChannels(env);
-    if (requireJoin.length && !isAdmin(uid)) {
-      const joined = await isUserJoinedAllRequiredChannels(env, uid);
-      if (!joined) { await presentJoinPrompt(env, chatId); return; }
+    if (!skipJoin) {
+      const requireJoin = await getRequiredChannels(env);
+      if (requireJoin.length && !isAdmin(uid)) {
+        const joined = await isUserJoinedAllRequiredChannels(env, uid);
+        if (!joined) { await presentJoinPrompt(env, chatId); return; }
+      }
     }
   } catch (_) {}
   await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: await buildDynamicMainMenu(env, uid) });
@@ -1012,13 +1015,8 @@ async function onMessage(msg, env) {
     await tgApi('sendMessage', { chat_id: chatId, text: 'در حال بروزرسانی به آخرین نسخه…' });
     await sleep(6500);
     await tgApi('sendMessage', { chat_id: chatId, text: 'بروزرسانی انجام شد ✅' });
-    // Enforce join before showing menu
-    const requireJoin0 = await getRequiredChannels(env);
-    if (requireJoin0.length && !isAdmin(uid)) {
-      const joinedAll0 = await isUserJoinedAllRequiredChannels(env, uid);
-      if (!joinedAll0) { await presentJoinPrompt(env, chatId); return; }
-    }
-    await sendMainMenu(env, chatId, uid);
+    // پس از آپدیت، بدون بررسی عضویت منو را نمایش بده
+    await sendMainMenu(env, chatId, uid, { skipJoin: true });
     return;
   }
 
