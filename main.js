@@ -1130,6 +1130,8 @@ async function onMessage(msg, env) {
   if (!text) { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
   // /start: show menu or handle deep-link payloads
   if (text.startsWith('/start')) {
+    // Diagnostic: confirm /start path is reached
+    try { await tgApi('sendMessage', { chat_id: chatId, text: '🟢 شروع دریافت شد، در حال نمایش منو…' }); } catch (_) {}
     const parts = text.split(/\s+/);
     const payload = parts[1] || '';
     // Support '/start d_<token>' deep-links to deliver content inside bot
