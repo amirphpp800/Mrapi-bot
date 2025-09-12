@@ -35,7 +35,7 @@ Sections (edit guide):
 12) Public endpoints (backup, file download)
 */
 
-import ranges from './range.json';
+import ranges from './range.json' assert { type: 'json' };
 import { handleWireguardCallback, handleWireguardMyConfig } from './wg.js';
 
 /* ==================== 1) Config & Runtime (EDIT HERE) ==================== */
@@ -306,14 +306,25 @@ export default {
 
 /* ==================== 2) KV helpers ==================== */
 async function kvGetJson(env, key) {
-  const v = await env.BOT_KV.get(key);
-  return v ? JSON.parse(v) : null;
+  try {
+    if (!env || !env.BOT_KV || typeof env.BOT_KV.get !== 'function') return null;
+    const v = await env.BOT_KV.get(key);
+    return v ? JSON.parse(v) : null;
+  } catch (_) {
+    return null;
+  }
 }
 async function kvPutJson(env, key, obj) {
-  return env.BOT_KV.put(key, JSON.stringify(obj));
+  try {
+    if (!env || !env.BOT_KV || typeof env.BOT_KV.put !== 'function') return;
+    return await env.BOT_KV.put(key, JSON.stringify(obj));
+  } catch (_) { return; }
 }
 async function kvDelete(env, key) {
-  try { return await env.BOT_KV.delete(key); } catch (_) { return; }
+  try {
+    if (!env || !env.BOT_KV || typeof env.BOT_KV.delete !== 'function') return;
+    return await env.BOT_KV.delete(key);
+  } catch (_) { return; }
 }
 
 /* ==================== 3) Telegram helpers ==================== */
