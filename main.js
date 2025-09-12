@@ -998,6 +998,22 @@ async function onMessage(msg, env) {
   }
 
   const text = (msg.text || '').trim();
+  // /start: show menu or handle deep-link payloads
+  if (text.startsWith('/start')) {
+    const parts = text.split(/\s+/);
+    const payload = parts[1] || '';
+    // Support '/start d_<token>' deep-links to deliver content inside bot
+    if (payload && payload.startsWith('d_')) {
+      const token = payload.slice(2).trim();
+      if (token) {
+        await handleBotDownload(env, uid, chatId, token, null);
+        return;
+      }
+    }
+    // Default: show main menu (with join check inside)
+    await sendMainMenu(env, chatId, uid);
+    return;
+  }
   // /update: simulate updating flow then show menu
   if (text === '/update') {
     await tgApi('sendMessage', { chat_id: chatId, text: 'در حال بروزرسانی به آخرین نسخه…' });
