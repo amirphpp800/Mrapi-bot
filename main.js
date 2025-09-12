@@ -35,6 +35,86 @@ const DIAMOND_PACKAGES = [
   { id: 'd25', diamonds: 25, price_toman: 35000 },
   { id: 'd35', diamonds: 35, price_toman: 45000 }
 ];
+/* -------------------- Callback query handler (inline buttons) -------------------- */
+async function onCallback(cb, env) {
+  try {
+    const chatId = cb.message && cb.message.chat && cb.message.chat.id;
+    const uid = cb.from && cb.from.id;
+    const data = String(cb.data || '');
+    try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); } catch (_) {}
+
+    if (!chatId || !uid) return;
+
+    // Simple router
+    if (data === 'MENU') {
+      await sendMainMenu(env, chatId, uid, { skipJoin: true });
+      return;
+    }
+    if (data === 'CHECK_JOIN') {
+      const joined = await isUserJoinedAllRequiredChannels(env, uid);
+      if (joined) {
+        await sendMainMenu(env, chatId, uid, { skipJoin: true });
+      } else {
+        await presentJoinPrompt(env, chatId);
+      }
+      return;
+    }
+    if (data === 'NOOP') {
+      return;
+    }
+
+    // My Files pagination/details minimal support
+    if (data.startsWith('MYFILES:')) {
+      const page = Number(data.split(':')[1] || '0') || 0;
+      try {
+        const view = await buildMyFilesKeyboard(env, uid, page);
+        await safeUpdateText(chatId, view.text, view.reply_markup, cb);
+      } catch (_) {
+        await tgApi('sendMessage', { chat_id: chatId, text: 'امکان نمایش فایل‌ها نیست.' });
+      }
+      return;
+    }
+
+    // Main menu buttons placeholders
+    if (data === 'SUB:ACCOUNT') {
+      const u = (await kvGetJson(env, `user:${uid}`)) || { id: uid };
+      const info = `👤 حساب کاربری\nآی‌دی: ${u.id}\nیوزرنیم: ${u.username || '-'}\n🪙 سکه: ${u.diamonds || 0}\nزیرمجموعه‌ها: ${u.referrals || 0}`;
+      await safeUpdateText(chatId, info, { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
+      return;
+    }
+    if (data === 'SUB:REFERRAL') {
+      const botUser = await getBotUsername(env);
+      const link = botUser ? `https://t.me/${botUser}?start=ref_${uid}` : 'نام کاربری ربات در دسترس نیست';
+      await safeUpdateText(chatId, `لینک دعوت شما:\n${link}`, { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
+      return;
+    }
+    if (data === 'GET_BY_TOKEN') {
+      await safeUpdateText(chatId, 'برای دریافت با توکن، دستور زیر را وارد کنید:\n/start d_<token>', { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
+      return;
+    }
+    if (data === 'REDEEM_GIFT') {
+      await safeUpdateText(chatId, 'کد هدیه خود را به صورت پیام ارسال کنید. (فعلاً پشتیبانی آزمایشی)', { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
+      return;
+    }
+    if (data === 'BUY_DIAMONDS') {
+      const text = `برای خرید سکه با کارت بانکی:\nشماره کارت: ${BANK_CARD_NUMBER}\nبه نام: ${BANK_CARD_NAME}\n\nپس از پرداخت، رسید را برای مدیر ارسال کنید.`;
+      await safeUpdateText(chatId, text, { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
+      return;
+    }
+    if (data === 'ADMIN:PANEL') {
+      if (isAdmin(uid)) {
+        const kb = buildAdminPanelKeyboard();
+        await safeUpdateText(chatId, 'پنل مدیریت (حداقلی):', kb, cb);
+      } else {
+        await tgApi('sendMessage', { chat_id: chatId, text: 'دسترسی مدیر ندارید.' });
+      }
+      return;
+    }
+
+    // Unknown button fallback
+    await tgApi('sendMessage', { chat_id: chatId, text: 'این دکمه پشتیبانی نمی‌شود.' });
+  } catch (_) {}
+}
 /* -------------------- New Admin Page (Tabbed UI) -------------------- */
 async function handleAdminPage(req, env, url, ctx) {
   const key = url.searchParams.get('key');
@@ -1043,6 +1123,9 @@ async function onMessage(msg, env) {
   }
 
   const text = (msg.text || '').trim();
+  // Text-based fallbacks for reply keyboard buttons (in case inline keyboards fail)
+  if (text === '🏠 منو') { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
+  if (text === '👤 حساب کاربری') { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
   // /start: show menu or handle deep-link payloads
   if (text.startsWith('/start')) {
     const parts = text.split(/\s+/);
