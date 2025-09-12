@@ -4121,4 +4121,3 @@ async function ensureWebhookForRequest(env, req) {
 
 /* End of enhanced worker */
 }
-
