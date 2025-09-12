@@ -819,27 +819,47 @@ async function buildDynamicMainMenu(env, uid) {
   const isAdminUser = isAdmin(uid);
   const settings = await getSettings(env);
 
-  // Build rows explicitly per requested order
+  // Build rows explicitly per requested order, checking for disabled buttons
   const rows = [];
+  
   // Row 1: Account | Referral
-  rows.push([
-    { text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' },
-    { text: '👥 زیرمجموعه گیری', callback_data: 'SUB:REFERRAL' }
-  ]);
+  const row1 = [];
+  if (!isButtonDisabledCached(settings, 'SUB:ACCOUNT')) {
+    row1.push({ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' });
+  }
+  if (!isButtonDisabledCached(settings, 'SUB:REFERRAL')) {
+    row1.push({ text: '👥 زیرمجموعه گیری', callback_data: 'SUB:REFERRAL' });
+  }
+  if (row1.length > 0) rows.push(row1);
+
   // Row 2: Get by token | Gift code
-  rows.push([
-    { text: '🔑 دریافت با توکن', callback_data: 'GET_BY_TOKEN' },
-    { text: '🎁 کد هدیه', callback_data: 'REDEEM_GIFT' }
-  ]);
+  const row2 = [];
+  if (!isButtonDisabledCached(settings, 'GET_BY_TOKEN')) {
+    row2.push({ text: '🔑 دریافت با توکن', callback_data: 'GET_BY_TOKEN' });
+  }
+  if (!isButtonDisabledCached(settings, 'REDEEM_GIFT')) {
+    row2.push({ text: '🎁 کد هدیه', callback_data: 'REDEEM_GIFT' });
+  }
+  if (row2.length > 0) rows.push(row2);
+
   // Row 3: Buy coins (admins also see My Files appended on this row)
-  rows.push([
-    { text: '💳 خرید سکه', callback_data: 'BUY_DIAMONDS' },
-    ...(isAdminUser ? [{ text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' }] : [])
-  ]);
+  const row3 = [];
+  if (!isButtonDisabledCached(settings, 'BUY_DIAMONDS')) {
+    row3.push({ text: '💳 خرید سکه', callback_data: 'BUY_DIAMONDS' });
+  }
+  if (isAdminUser) {
+    row3.push({ text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' });
+  }
+  if (row3.length > 0) rows.push(row3);
 
   // Bottom: Admin Panel (only for admins)
   if (isAdminUser) {
     rows.push([{ text: '🛠 پنل مدیریت', callback_data: 'ADMIN:PANEL' }]);
+  }
+
+  // Ensure we always have at least one button (fallback)
+  if (rows.length === 0) {
+    rows.push([{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }]);
   }
 
   return { inline_keyboard: rows };
