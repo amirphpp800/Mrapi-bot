@@ -1,5 +1,6 @@
 /*
 Cloudflare Worker — Telegram WireGuard Bot (Enhanced)
+*/
 
 import ranges from './ranges.js';
 import { handleWireguardCallback, handleWireguardMyConfig } from './wg.js';
