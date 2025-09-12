@@ -35,7 +35,7 @@ Sections (edit guide):
 12) Public endpoints (backup, file download)
 */
 
-import ranges from './range.json' assert { type: 'json' };
+import ranges from './ranges.js';
 import { handleWireguardCallback, handleWireguardMyConfig } from './wg.js';
 
 /* ==================== 1) Config & Runtime (EDIT HERE) ==================== */
@@ -350,23 +350,37 @@ function requireTelegramToken() {
 }
 
 async function tgApi(method, body) {
-  const token = requireTelegramToken();
-  return fetch(`${TELEGRAM_API(token)}/${method}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-  }).then(r => r.json());
+  try {
+    const token = requireTelegramToken();
+    return fetch(`${TELEGRAM_API(token)}/${method}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    }).then(r => r.json());
+  } catch (_) {
+    // No token configured; avoid crashing the request path
+    return { ok: false, error: 'no_token' };
+  }
 }
 async function tgGet(path) {
-  const token = requireTelegramToken();
-  return fetch(`${TELEGRAM_API(token)}/${path}`).then(r => r.json());
+  try {
+    const token = requireTelegramToken();
+    return fetch(`${TELEGRAM_API(token)}/${path}`).then(r => r.json());
+  } catch (_) {
+    // No token configured
+    return null;
+  }
 }
 
 // Upload helper for multipart/form-data requests (e.g., sendDocument with a file)
 async function tgUpload(method, formData) {
-  const token = requireTelegramToken();
-  return fetch(`${TELEGRAM_API(token)}/${method}`, {
-    method: 'POST',
-    body: formData
-  }).then(r => r.json());
+  try {
+    const token = requireTelegramToken();
+    return fetch(`${TELEGRAM_API(token)}/${method}`, {
+      method: 'POST',
+      body: formData
+    }).then(r => r.json());
+  } catch (_) {
+    return { ok: false, error: 'no_token' };
+  }
 }
 
 // Edit-in-place helper to reduce chat clutter (handles media; falls back to send on failure)
