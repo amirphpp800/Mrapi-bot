@@ -1126,6 +1126,8 @@ async function onMessage(msg, env) {
   // Text-based fallbacks for reply keyboard buttons (in case inline keyboards fail)
   if (text === '🏠 منو') { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
   if (text === '👤 حساب کاربری') { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
+  // If no text present (e.g., some clients), still show menu
+  if (!text) { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
   // /start: show menu or handle deep-link payloads
   if (text.startsWith('/start')) {
     const parts = text.split(/\s+/);
