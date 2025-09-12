@@ -3392,6 +3392,6 @@ async function ensureWebhookForRequest(env, req) {
     await kvPutJson(env, 'bot:webhook_check_at', nowTs);
   } catch (_) { /* ignore */ }
 }
-
+  
 /* End of enhanced worker */
 }
