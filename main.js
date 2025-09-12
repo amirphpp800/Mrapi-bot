@@ -937,12 +937,47 @@ async function sendMainMenu(env, chatId, uid, opts = {}) {
   let menu;
   try { menu = await buildDynamicMainMenu(env, uid); } catch (_) { menu = null; }
 
-  // Try sending with keyboard first, then fallback to plain text
+  // Try sending with keyboard first, then fallback to alternatives and finally plain text
+  let lastErrDesc = '';
   try {
     const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: menu || undefined });
-    if (!res || !res.ok) throw new Error('send_with_keyboard_failed');
-  } catch (_) {
-    await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید.' });
+    if (!res || !res.ok) { lastErrDesc = (res && (res.description || res.error)) || ''; throw new Error('send_with_keyboard_failed'); }
+  } catch (e1) {
+    // Try a minimal safe keyboard as a fallback to force showing buttons
+    try {
+      const minimal = { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] };
+      const res2 = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: minimal });
+      if (!res2 || !res2.ok) { lastErrDesc = (res2 && (res2.description || res2.error)) || lastErrDesc; throw new Error('send_minimal_keyboard_failed'); }
+    } catch (e2) {
+      // Try a classic reply keyboard as another fallback
+      try {
+        const replyKb = {
+          keyboard: [[{ text: '👤 حساب کاربری' }], [{ text: '🏠 منو' }]],
+          resize_keyboard: true,
+          one_time_keyboard: false
+        };
+        const res3 = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyKb });
+        if (!res3 || !res3.ok) { lastErrDesc = (res3 && (res3.description || res3.error)) || lastErrDesc; throw new Error('send_reply_keyboard_failed'); }
+      } catch (e3) {
+        // Try an inline URL button (should always render visually)
+        try {
+          const botUsername = await getBotUsername(env);
+          const urlKb = botUsername ? { inline_keyboard: [[{ text: 'باز کردن ربات', url: `https://t.me/${botUsername}` }]] } : null;
+          if (urlKb) {
+            const res4 = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: urlKb });
+            if (!res4 || !res4.ok) { lastErrDesc = (res4 && (res4.description || res4.error)) || lastErrDesc; throw new Error('send_url_keyboard_failed'); }
+          } else {
+            throw new Error('no_bot_username');
+          }
+        } catch (e4) {
+          // Final fallback: plain text
+          await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید.' });
+          if (lastErrDesc) {
+            await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ امکان نمایش دکمه‌ها نبود. خطا: ${lastErrDesc}` });
+          }
+        }
+      }
+    }
   }
 }
 
