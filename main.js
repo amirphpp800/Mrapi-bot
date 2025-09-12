@@ -42,7 +42,8 @@ import { handleWireguardCallback, handleWireguardMyConfig } from './wg.js';
 // IMPORTANT: Set secrets in environment variables for production. The values
 // below are fallbacks to help local testing. Prefer configuring via `env`.
 // EDIT: TELEGRAM_TOKEN, ADMIN_IDS, ADMIN_KEY, WEBHOOK_URL, JOIN_CHAT
-const TELEGRAM_TOKEN = "";
+const TELEGRAM_TOKEN = "7591077984:AAHOKK7fahjkCZZD-ggwOarbaKCGBUkV06A";
+
 const ADMIN_IDS = []; // provide via env `ADMIN_IDS` (comma-separated)
 const ADMIN_KEY = ""; // provide via env `ADMIN_KEY`
 const WEBHOOK_URL = ""; // provide via env `WEBHOOK_URL`
@@ -367,7 +368,8 @@ async function kvDelete(env, key) {
 
 /* ==================== 3) Telegram helpers ==================== */
 function populateRuntimeFromEnv(env) {
-  RUNTIME.tgToken = env?.TELEGRAM_TOKEN || TELEGRAM_TOKEN || '';
+  // Use hardcoded token as requested; ignore env for TELEGRAM_TOKEN
+  RUNTIME.tgToken = TELEGRAM_TOKEN || '';
   RUNTIME.webhookUrl = env?.WEBHOOK_URL || WEBHOOK_URL || '';
   RUNTIME.webhookSecret = null; // secret disabled
   RUNTIME.adminKey = env?.ADMIN_KEY || ADMIN_KEY || '';
@@ -2453,147 +2455,7 @@ async function handleMainPage(req, env, url, ctx) {
     await kvPutJson(env, 'bot:webhook_set_at', 0);
     return Response.redirect(`/?key=${adminKey}`, 302);
   }
-  // Admin view: full users list
-  if (isAuthenticated && action === 'users') {
-    const users = (await kvGetJson(env, 'index:users')) || [];
-    const entries = await Promise.all(users.map(async (uid, idx) => {
-      const u = (await kvGetJson(env, `user:${uid}`)) || { id: uid };
-      const blocked = await isUserBlocked(env, uid);
-      return {
-        idx: idx + 1,
-        id: uid,
-        first_name: u.first_name || '-',
-        username: u.username || '-',
-        diamonds: u.diamonds || 0,
-        referrals: u.referrals || 0,
-        joined: u.joined ? '✅' : '—',
-        created_at: u.created_at || 0,
-        last_seen: u.last_seen || 0,
-        referred_by: u.referred_by || '-',
-        ref_credited: u.ref_credited ? '✅' : '—',
-        blocked
-      };
-    }));
 
-    const html = `<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>فهرست کامل کاربران</title>
-  <style>
-    :root { --glass-bg: rgba(255,255,255,.05); --glass-border: rgba(255,255,255,.1); --accent:#60a5fa; }
-    body { margin:0; font-family: Segoe UI, Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg,#0f172a,#1e293b,#334155); color:#f1f5f9; }
-    .container{ max-width:1400px; margin:0 auto; padding:20px; }
-    .header{ background:var(--glass-bg); border:1px solid var(--glass-border); border-radius:16px; padding:24px; margin:20px 0; backdrop-filter: blur(10px); box-shadow:0 10px 24px rgba(0,0,0,.25); }
-    .header h2{ margin:0 0 8px 0; font-weight:700; font-size:1.8rem; color:var(--accent); }
-    .actions{ display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; }
-    .btn{ display:inline-block; padding:10px 16px; border-radius:10px; background: linear-gradient(135deg,#3b82f6,#1d4ed8); color:white; text-decoration:none; border:none; cursor:pointer; box-shadow:0 8px 18px rgba(29,78,216,.35); }
-    .btn:hover{ box-shadow:0 12px 24px rgba(59,130,246,.5); transform: translateY(-1px); }
-    .search{ display:flex; gap:10px; margin-top:12px; }
-    .search input{ flex:1; padding:12px; border-radius:10px; border:1px solid var(--glass-border); background: rgba(255,255,255,.08); color:white; }
-    .table-wrap{ background:rgba(255,255,255,.03); border:1px solid var(--glass-border); border-radius:14px; overflow:hidden; box-shadow:0 10px 28px rgba(0,0,0,.25); }
-    table{ width:100%; border-collapse:collapse; }
-    thead{ position:sticky; top:0; background: rgba(255,255,255,.08); }
-    th,td{ text-align:right; padding:12px 10px; border-bottom:1px solid rgba(255,255,255,.06); font-size:.95rem; }
-    tbody tr:nth-child(even) td{ background: rgba(255,255,255,.03); }
-    tbody tr:hover td{ background: rgba(255,255,255,.07); }
-    .muted{ opacity:.8; }
-    .status-badge{ padding:4px 10px; border-radius:12px; font-size:.85rem; border:1px solid var(--glass-border); }
-    .ok{ background: rgba(34,197,94,.2); color:#22c55e; border-color: rgba(34,197,94,.3); }
-    .bad{ background: rgba(239,68,68,.2); color:#ef4444; border-color: rgba(239,68,68,.3); }
-    .table-scroller{ max-height:70vh; overflow:auto; }
-    code{ opacity:.8; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h2>👥 فهرست کامل کاربران</h2>
-      <div class="muted">تعداد کاربران: ${entries.length.toLocaleString('fa-IR')}</div>
-      <div class="actions">
-        <a class="btn" href="/?key=${adminKey}">⬅️ بازگشت به پنل</a>
-      </div>
-      <div class="search">
-        <input id="q" type="text" placeholder="جستجو بر اساس آی‌دی، نام یا یوزرنیم..." />
-        <button class="btn" id="clearBtn">پاک کردن</button>
-      </div>
-    </div>
-    <div class="table-wrap">
-      <div class="table-scroller">
-        <table id="usersTbl">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>آی‌دی</th>
-              <th>نام</th>
-              <th>یوزرنیم</th>
-              <th>الماس</th>
-              <th>معرفی‌ها</th>
-              <th>عضویت</th>
-              <th>ارجاع از</th>
-              <th>ارجاع ثبت شده</th>
-              <th>آخرین فعالیت</th>
-              <th>تاریخ عضویت</th>
-              <th>وضعیت</th>
-              <th>اقدام</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${entries.map(e => `
-              <tr>
-                <td>${e.idx}</td>
-                <td><code>${e.id}</code></td>
-                <td>${escapeHtml(e.first_name)}</td>
-                <td>${escapeHtml(e.username)}</td>
-                <td>${(e.diamonds||0).toLocaleString('fa-IR')}</td>
-                <td>${(e.referrals||0).toLocaleString('fa-IR')}</td>
-                <td>${e.joined}</td>
-                <td>${e.referred_by}</td>
-                <td>${e.ref_credited}</td>
-                <td data-ts="${e.last_seen}">-</td>
-                <td data-tsc="${e.created_at}">-</td>
-                <td><span class="status-badge ${e.blocked ? 'bad' : 'ok'}">${e.blocked ? '⛔️ مسدود' : '🟢 فعال'}</span></td>
-                <td>
-                  ${e.blocked 
-                    ? `<a class="btn" href="/?key=${adminKey}&op=unblock&uid=${e.id}">آنبلاک</a>`
-                    : `<a class="btn" href="/?key=${adminKey}&op=block&uid=${e.id}">Block</a>`}
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-  <script>
-    // Humanize timestamps
-    function human(ts){ try{ const n = Number(ts)||0; if(!n) return '-'; return new Date(n).toLocaleString('fa-IR'); }catch(_){ return '-'; } }
-    // Fill timestamps from data attributes
-    document.querySelectorAll('#usersTbl tbody tr').forEach(tr => {
-      const lastTd = tr.querySelector('td[data-ts]');
-      const createdTd = tr.querySelector('td[data-tsc]');
-      if (lastTd) lastTd.textContent = human(lastTd.getAttribute('data-ts'));
-      if (createdTd) createdTd.textContent = human(createdTd.getAttribute('data-tsc'));
-    });
-    // Filter
-    const q = document.getElementById('q');
-    const clearBtn = document.getElementById('clearBtn');
-    function filter(){
-      const term = (q.value||'').toLowerCase();
-      document.querySelectorAll('#usersTbl tbody tr').forEach(tr => {
-        const text = tr.textContent.toLowerCase();
-        tr.style.display = text.includes(term) ? '' : 'none';
-      });
-    }
-    q.addEventListener('input', filter);
-    clearBtn.addEventListener('click', ()=>{ q.value=''; filter(); });
-  </script>
-</body>
-</html>`;
-
-    return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' } });
-  }
   // Admin actions: block/unblock via GET
   if (isAuthenticated && op && targetId) {
     const tid = Number(targetId);
