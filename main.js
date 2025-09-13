@@ -828,26 +828,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, 'رسید شما دریافت شد. در حال بررسی توسط پشتیبانی ✅', kbAdminInfo);
         return;
       }
-      if (data.startsWith('file_delete:')) {
-        const t = data.split(':')[1];
-        const key = CONFIG.FILE_PREFIX + t;
-        const meta = await kvGet(env, key);
-        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
-        const kbDel = kb([[{ text: '✅ تایید حذف', callback_data: 'file_delete_confirm:'+t }],[{ text: '🔙 انصراف', callback_data: 'file_manage:'+t }]]);
-        await tgEditMessage(env, chat_id, mid, `❗️ آیا از حذف فایل با توکن <code>${t}</code> مطمئن هستید؟ این عملیات غیرقابل بازگشت است.`, kbDel);
-        await tgAnswerCallbackQuery(env, cb.id);
-        return;
-      }
-      if (data.startsWith('file_delete_confirm:')) {
-        const t = data.split(':')[1];
-        const key = CONFIG.FILE_PREFIX + t;
-        const meta = await kvGet(env, key);
-        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
-        await kvDel(env, key);
-        await tgEditMessage(env, chat_id, mid, `🗑 فایل با توکن <code>${t}</code> حذف شد.`, fmMenuKb());
-        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
-        return;
-      }
+      
       if (msg.document && msg.document.file_id) {
         mediaHandled = true;
         const purchaseId = stBuy.purchase_id || newToken(8);
@@ -1449,6 +1430,28 @@ async function onCallback(cb, env) {
         await setUserState(env, uid, { step: 'file_replace_wait', token: t });
         await tgSendMessage(env, chat_id, '📤 لطفاً فایل/رسانه جدید را ارسال کنید.');
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+
+      if (data.startsWith('file_delete:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        const kbDel = kb([[{ text: '✅ تایید حذف', callback_data: 'file_delete_confirm:' + t }],[{ text: '🔙 انصراف', callback_data: 'file_manage:' + t }]]);
+        await tgEditMessage(env, chat_id, mid, `❗️ آیا از حذف فایل با توکن <code>${t}</code> مطمئن هستید؟ این عملیات غیرقابل بازگشت است.`, kbDel);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+
+      if (data.startsWith('file_delete_confirm:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        await kvDel(env, key);
+        await tgEditMessage(env, chat_id, mid, `🗑 فایل با توکن <code>${t}</code> حذف شد.`, fmMenuKb());
+        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
         return;
       }
 
