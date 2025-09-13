@@ -49,9 +49,16 @@ const CONFIG = {
 
 // صفحات فانکشنز env: { BOT_KV }
 
-function mainMenuText() {
-  // Show version under the main menu caption
-  return `منو اصلی:\nنسخه ربات: 1.0`;
+async function getBotVersion(env) {
+  try {
+    const s = await getSettings(env);
+    return s?.bot_version || '1.0';
+  } catch { return '1.0'; }
+}
+
+async function mainMenuHeader(env) {
+  const v = await getBotVersion(env);
+  return `منو اصلی:\nنسخه ربات: ${v}`;
 }
 
 // Get bot info (for auto-detecting username if BOT_USERNAME is not set)
@@ -85,10 +92,10 @@ async function autoCreditReferralIfNeeded(env, referrerId, referredId) {
     const doneKey = CONFIG.REF_DONE_PREFIX + String(referredId);
     const done = await kvGet(env, doneKey);
     if (done) return false; // already credited once
-    const amount = 1; // grant 1 coin to referred user
-    const credited = await creditBalance(env, String(referredId), amount);
+    const amount = 1; // grant 1 coin to referrer
+    const credited = await creditBalance(env, String(referrerId), amount);
     if (!credited) return false;
-    // optionally bump referrer counter
+    // bump referrer counter
     const ru = await getUser(env, String(referrerId));
     if (ru) { ru.ref_count = Number(ru.ref_count || 0) + 1; await setUser(env, String(referrerId), ru); }
     await kvSet(env, doneKey, { ts: nowTs(), amount, referrer_id: String(referrerId) });
@@ -370,7 +377,7 @@ function isAdminUser(env, uid) {
 
 function mainMenuKb(env, uid) {
   const rows = [
-    [ { text: '👤 حساب کاربری', callback_data: 'account' }, { text: '👥 معرفی دوستان', callback_data: 'referrals' } ],
+    [ { text: '👥 معرفی دوستان', callback_data: 'referrals' }, { text: '👤 حساب کاربری', callback_data: 'account' } ],
     [ { text: '🎁 کد هدیه', callback_data: 'giftcode' }, { text: '🔑 دریافت با توکن', callback_data: 'redeem_token' } ],
     [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
   ];
@@ -396,7 +403,6 @@ function adminMenuKb(settings) {
     [ { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' }, { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' } ],
     [ { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     [ { text: '➕ افزودن سکه', callback_data: 'adm_add' }, { text: '➖ کسر سکه', callback_data: 'adm_sub' } ],
-    [ { text: '🧾 قیمت هر سکه', callback_data: 'adm_cost' } ],
   ]);
 }
 
@@ -546,7 +552,7 @@ async function onMessage(msg, env) {
     }
     if (text.startsWith('/update')) {
       await clearUserState(env, uid);
-      await tgSendMessage(env, chat_id, mainMenuText(), mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, await mainMenuHeader(env), mainMenuKb(env, uid));
       return;
     }
 
@@ -559,14 +565,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, 'سرویس موقتاً غیرفعال است. لطفاً بعداً تلاش کنید.');
         return;
       }
-      if (data === 'adm_cost') {
-        await setUserState(env, uid, { step: 'adm_cost_wait' });
-        const s = await getSettings(env);
-        const cur = s?.price_per_coin ? `قیمت فعلی هر 🪙 سکه: ${fmtNum(s.price_per_coin)} تومان` : 'قیمت فعلی تنظیم نشده است';
-        await tgEditMessage(env, chat_id, mid, `${cur}\nمقدار جدید را به تومان ارسال کنید:`, {});
-        await tgAnswerCallbackQuery(env, cb.id);
-        return;
-      }
+      // adm_cost removed per request
 
       // اگر ادمین در فلو آپلود است
       const st = await getUserState(env, uid);
@@ -661,15 +660,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nلینک: ${link}`);
         return;
       }
-      if (isAdminUser(env, uid) && state?.step === 'adm_cost_wait') {
-        const amount = Number(text.replace(/[^0-9]/g, ''));
-        const s = await getSettings(env);
-        s.price_per_coin = amount > 0 ? amount : 0;
-        await setSettings(env, s);
-        await tgSendMessage(env, chat_id, `🧾 قیمت هر 🪙 سکه تنظیم شد: ${fmtNum(s.price_per_coin)} تومان`);
-        await clearUserState(env, uid);
-        return;
-      }
+      // no adm_cost state anymore
       // Admin flows
       if (isAdminUser(env, uid)) {
         if (state?.step === 'adm_join_wait') {
@@ -755,14 +746,16 @@ async function onCallback(cb, env) {
     if (data === 'join_check') {
       const ok = await ensureJoinedChannels(env, uid, chat_id, true);
       if (ok) {
-        await tgEditMessage(env, chat_id, mid, '✅ عضویت شما تایید شد. منو اصلی:', mainMenuKb(env, uid));
+        const hdr = await mainMenuHeader(env);
+        await tgEditMessage(env, chat_id, mid, `✅ عضویت شما تایید شد.\n${hdr}`, mainMenuKb(env, uid));
       }
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
     if (data === 'back_main') {
-      await tgEditMessage(env, chat_id, mid, 'منو اصلی:', mainMenuKb(env, uid));
+      const hdr = await mainMenuHeader(env);
+      await tgEditMessage(env, chat_id, mid, hdr, mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -819,10 +812,7 @@ async function onCallback(cb, env) {
     }
 
     if (data === 'buy_coins') {
-      const s = await getSettings(env);
-      const price = s?.price_per_coin || 0;
-      const info = price ? `قیمت هر سکه: <b>${fmtNum(price)}</b> تومان` : 'برای خرید سکه با پشتیبانی تماس بگیرید.';
-      await tgSendMessage(env, chat_id, `🪙 خرید سکه\n${info}`);
+      await tgSendMessage(env, chat_id, `🪙 خرید سکه\nبرای خرید سکه با پشتیبانی تماس بگیرید: https://t.me/NeoDebug`);
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -859,7 +849,8 @@ async function onCallback(cb, env) {
 
     if (data === 'update') {
       await clearUserState(env, uid);
-      await tgEditMessage(env, chat_id, mid, mainMenuText(), mainMenuKb(env, uid));
+      const hdr = await mainMenuHeader(env);
+      await tgEditMessage(env, chat_id, mid, hdr, mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -878,15 +869,7 @@ async function onCallback(cb, env) {
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
-      if (data === 'adm_toggle') {
-        const settings = await getSettings(env);
-        const enabled = !(settings?.service_enabled !== false);
-        settings.service_enabled = !enabled ? true : false;
-        await setSettings(env, settings);
-        await tgAnswerCallbackQuery(env, cb.id, settings.service_enabled ? 'سرویس فعال شد' : 'سرویس غیرفعال شد');
-        await tgEditMessage(env, chat_id, mid, 'پنل مدیریت:', adminMenuKb(settings));
-        return;
-      }
+      // adm_toggle removed per request
       if (data === 'adm_update_toggle') {
         const settings = await getSettings(env);
         settings.update_mode = settings.update_mode ? false : true;
@@ -954,10 +937,11 @@ async function sendWelcome(chat_id, uid, env, msg) {
     if (hasRef) {
       const ok = await autoCreditReferralIfNeeded(env, String(ref), String(uid));
       if (ok) {
-        try { await tgSendMessage(env, uid, `🎉 ثبت نام شما با لینک دعوت انجام شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
+        try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید ثبت شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
       }
     }
-    await tgSendMessage(env, chat_id, `به ${CONFIG.BOT_NAME} خوش آمدید!`, mainMenuKb(env, uid));
+    const hdr = await mainMenuHeader(env);
+    await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
 }
 
