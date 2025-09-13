@@ -1098,35 +1098,34 @@ async function onMessage(msg, env) {
   }
 
   const text = (msg.text || '').trim();
-  // Enforce join to required channels for non-admins on all commands except initial /start
-  try {
-    const requireJoin = await getRequiredChannels(env);
-    if (!text.startsWith('/start') && requireJoin.length && !isAdmin(uid)) {
-      const joinedAll = await isUserJoinedAllRequiredChannels(env, uid);
-      if (!joinedAll) { await presentJoinPrompt(env, chatId); return; }
-    }
-  } catch (_) {}
-  // Text-based fallbacks for reply keyboard buttons (in case inline keyboards fail)
-  if (text === '🏠 منو') { await sendMainMenu(env, chatId, uid); return; }
-  if (text === '👤 حساب کاربری') { await sendMainMenu(env, chatId, uid); return; }
-  // If no text present (e.g., some clients), still show menu
-  if (!text) { await sendMainMenu(env, chatId, uid); return; }
-  // /start: show menu or handle deep-link payloads
+  // 1) Handle /start FIRST (as on.js), so the first response is immediate
   if (text.startsWith('/start')) {
     const parts = text.split(/\s+/);
     const payload = parts[1] || '';
     // Support '/start d_<token>' deep-links to deliver content inside bot
     if (payload && payload.startsWith('d_')) {
       const token = payload.slice(2).trim();
-      if (token) {
-        await handleBotDownload(env, uid, chatId, token, null);
-        return;
-      }
+      if (token) { await handleBotDownload(env, uid, chatId, token, null); return; }
     }
     // Default: show main menu (skip join check on first start for immediate UX)
     await sendMainMenu(env, chatId, uid, { skipJoin: true });
     return;
   }
+
+  // 2) Enforce join to required channels for non-admins on all other commands
+  try {
+    const requireJoin = await getRequiredChannels(env);
+    if (requireJoin.length && !isAdmin(uid)) {
+      const joinedAll = await isUserJoinedAllRequiredChannels(env, uid);
+      if (!joinedAll) { await presentJoinPrompt(env, chatId); return; }
+    }
+  } catch (_) {}
+
+  // 3) Text-based fallbacks for reply keyboard buttons (in case inline keyboards fail)
+  if (text === '🏠 منو') { await sendMainMenu(env, chatId, uid); return; }
+  if (text === '👤 حساب کاربری') { await sendMainMenu(env, chatId, uid); return; }
+  // If no text present (e.g., some clients), still show menu
+  if (!text) { await sendMainMenu(env, chatId, uid); return; }
   // /update: simulate updating flow then show menu
   if (text === '/update') {
     await tgApi('sendMessage', { chat_id: chatId, text: 'در حال بروزرسانی به آخرین نسخه…' });
