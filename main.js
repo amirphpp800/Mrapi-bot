@@ -33,11 +33,68 @@ const CONFIG = {
 
 // صفحات فانکشنز env: { BOT_KV }
 
+// ارسال فایل به کاربر با رعایت قوانین قیمت/محدودیت
+async function deliverFileToUser(env, uid, chat_id, token) {
+  try {
+    const meta = await kvGet(env, CONFIG.FILE_PREFIX + token);
+    if (!meta || meta.disabled) {
+      await tgSendMessage(env, chat_id, 'فایل یافت نشد یا غیرفعال است.');
+      return false;
+    }
+    const users = Array.isArray(meta.users) ? meta.users : [];
+    const maxUsers = Number(meta.max_users || 0);
+    const price = Number(meta.price || 0);
+    const isOwner = String(meta.owner_id) === String(uid);
+    const already = users.includes(String(uid));
+    if (!already && maxUsers > 0 && users.length >= maxUsers) {
+      await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.');
+      return false;
+    }
+    if (!already && price > 0 && !isOwner) {
+      const u = await getUser(env, String(uid));
+      if (!u || Number(u.balance || 0) < price) {
+        await tgSendMessage(env, chat_id, 'موجودی شما برای دریافت فایل کافی نیست.');
+        return false;
+      }
+      u.balance = Number(u.balance || 0) - price;
+      await setUser(env, String(uid), u);
+    }
+    if (!already) {
+      users.push(String(uid));
+      meta.users = users;
+      await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+    }
+    // ارسال سند از طریق تلگرام
+    await tgSendDocument(env, chat_id, meta.file_id, { caption: `📄 ${meta.file_name || ''}` });
+    return true;
+  } catch (e) {
+    console.error('deliverFileToUser error', e);
+    await tgSendMessage(env, chat_id, 'خطا در ارسال فایل.');
+    return false;
+  }
+}
+
+async function handleTokenRedeem(env, uid, chat_id, token) {
+  try {
+    const t = String(token || '').trim();
+    if (!/^[A-Za-z0-9]{6}$/.test(t)) {
+      await tgSendMessage(env, chat_id, 'توکن نامعتبر است. یک توکن ۶ کاراکتری ارسال کنید.');
+      return;
+    }
+    const ok = await deliverFileToUser(env, uid, chat_id, t);
+    if (ok) {
+      await clearUserState(env, uid);
+    }
+  } catch (e) {
+    console.error('handleTokenRedeem error', e);
+  }
+}
+
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.4';
-  } catch { return '1.4'; }
+    return s?.bot_version || '1.5';
+  } catch { return '1.5'; }
 }
 
 async function mainMenuHeader(env) {
@@ -610,7 +667,7 @@ async function onMessage(msg, env) {
         return;
       }
 
-      const token = newToken();
+      const token = newToken(6);
       const meta = {
         token,
         owner_id: uid,
@@ -630,7 +687,9 @@ async function onMessage(msg, env) {
 
       const base = await getBaseUrlFromBot(env);
       const link = `${base}/f/${token}?uid=${uid}${meta.referrer_id ? `&ref=${encodeURIComponent(meta.referrer_id)}` : ''}`;
-      await tgSendMessage(env, chat_id, `فایل شما ذخیره شد ✅\nنام: <b>${htmlEscape(meta.file_name)}</b>\nحجم: <b>${fmtNum(meta.file_size)} بایت</b>\n\nلینک اختصاصی: ${link}`);
+      const botUser = await getBotUsername(env);
+      const deepLink = botUser ? `https://t.me/${botUser}?start=${token}` : '';
+      await tgSendMessage(env, chat_id, `فایل شما ذخیره شد ✅\nنام: <b>${htmlEscape(meta.file_name)}</b>\nحجم: <b>${fmtNum(meta.file_size)} بایت</b>\n\nلینک دریافت مستقیم: ${link}${deepLink ? `\nلینک دعوت دریافت در ربات: ${deepLink}` : ''}`);
       return;
     }
 
@@ -667,7 +726,7 @@ async function onMessage(msg, env) {
         const maxUsers = Number(text.replace(/[^0-9]/g, ''));
         const tmp = state.tmp || {};
         const price = Number(state.price || 0);
-        const token = newToken();
+        const token = newToken(6);
         const meta = {
           token,
           owner_id: uid,
@@ -686,7 +745,9 @@ async function onMessage(msg, env) {
         await clearUserState(env, uid);
         const base = await getBaseUrlFromBot(env);
         const link = `${base}/f/${token}?uid=${uid}`;
-        await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nلینک: ${link}`);
+        const botUser = await getBotUsername(env);
+        const deepLink = botUser ? `https://t.me/${botUser}?start=${token}` : '';
+        await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nلینک مستقیم: ${link}${deepLink ? `\nلینک دعوت دریافت در ربات: ${deepLink}` : ''}`);
         return;
       }
       // no adm_cost state anymore
@@ -801,6 +862,13 @@ async function onCallback(cb, env) {
     if (data === 'back_main') {
       const hdr = await mainMenuHeader(env);
       await tgEditMessage(env, chat_id, mid, hdr, mainMenuKb(env, uid));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data === 'redeem_token') {
+      await setUserState(env, uid, { step: 'redeem_token_wait' });
+      await tgSendMessage(env, chat_id, '🔑 لطفاً توکن ۶ کاراکتری فایل را ارسال کنید:');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -970,6 +1038,7 @@ async function sendWelcome(chat_id, uid, env, msg) {
     // Referral handling (auto credit after checks)
     const ref = extractReferrerFromStartParam(msg);
     const hasRef = ref && ref !== uid;
+    const startToken = extractFileTokenFromStartParam(msg);
     // ذخیره معرف در پروفایل کاربر تا پس از تایید عضویت هم قابل اعتباردهی باشد
     if (hasRef) {
       try {
@@ -995,6 +1064,11 @@ async function sendWelcome(chat_id, uid, env, msg) {
         try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید ثبت شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
       }
     }
+    // اگر /start <token> بود، فایل را پس از تایید عضویت ارسال کن
+    if (startToken) {
+      await deliverFileToUser(env, uid, chat_id, startToken);
+      return;
+    }
     const hdr = await mainMenuHeader(env);
     await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
@@ -1005,7 +1079,17 @@ function extractReferrerFromStartParam(msg) {
     const text = msg.text || msg.caption || '';
     // /start REF
     const parts = text.trim().split(/\s+/);
-    if (parts[0] === '/start' && parts[1]) return parts[1];
+    if (parts[0] === '/start' && parts[1] && /^\d+$/.test(parts[1])) return parts[1];
+    return '';
+  } catch { return ''; }
+}
+
+// تشخیص توکن فایل از پارامتر start (۶ کاراکتر آلفانامریک)
+function extractFileTokenFromStartParam(msg) {
+  try {
+    const text = msg.text || msg.caption || '';
+    const parts = text.trim().split(/\s+/);
+    if (parts[0] === '/start' && parts[1] && /^[A-Za-z0-9]{6}$/.test(parts[1])) return parts[1];
     return '';
   } catch { return ''; }
 }
@@ -1184,6 +1268,7 @@ async function routerFetch(request, env, ctx) {
     console.error('routerFetch error', e);
     return new Response('Internal Error', { status: 500 });
   }
+}
 // 9) Public Status Page (Glassmorphism)
 // =========================================================
 function renderStatusPage(settings, stats, envSummary = {}) {
@@ -1200,13 +1285,13 @@ function renderStatusPage(settings, stats, envSummary = {}) {
   @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;600&display=swap');
   :root { --bg: #0f172a; --card: rgba(255,255,255,0.08); --text: #e5e7eb; --sub:#94a3b8; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; }
   *{ box-sizing:border-box; }
-  body{ margin:0; font-family:'Vazirmatn',sans-serif; background:linear-gradient(180deg,#0b1020,#141a2f); color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+  body{ margin:0; font-family:'Vazirmatn',sans-serif; background:#000; color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
   .container{ width:100%; max-width:720px; }
   header{ text-align:center; margin-bottom:24px; }
   h1{ font-weight:600; margin:0 0 6px; }
   p{ margin:0; color:var(--sub); }
   .grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
-  .card{ background:var(--card); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:16px; backdrop-filter: blur(10px); box-shadow:0 10px 30px rgba(0,0,0,0.25); }
+  .card{ background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:16px; backdrop-filter: blur(10px); box-shadow:0 10px 30px rgba(0,0,0,0.6); }
   .stat{ font-size:14px; }
   .pill{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; }
   .ok{ background:rgba(52,211,153,0.15); color:#34d399; }
@@ -1253,6 +1338,5 @@ function renderStatusPage(settings, stats, envSummary = {}) {
 
 // پیام‌ها را به تیکت تبدیل نمی‌کنیم؛ فقط راهنمایی ساده، ولی می‌توانید پیام‌های آزاد را ذخیره کنید.
 
-// 11) Default export
-const app = { fetch: routerFetch };
-export default app;
+// 11) Expose app via global (avoid ESM export for Wrangler)
+globalThis.APP = { fetch: routerFetch };
