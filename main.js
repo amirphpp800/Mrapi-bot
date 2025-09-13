@@ -37,13 +37,24 @@ const CONFIG = {
     { id: 'p3', coins: 50, price_label: '۲۳۰٬۰۰۰ تومان' },
   ],
   CARD_INFO: {
-    card_number: '6037-9915-1234-5678',
-    holder_name: 'نام دارنده کارت',
+    card_number: '6219 8619 4308 4037',
+    holder_name: 'امیرحسین سیاهبالائی',
     pay_note: 'لطفاً پس از پرداخت، رسید را ارسال کنید.'
   },
 };
 
 // صفحات فانکشنز env: { BOT_KV }
+
+// پنل مدیریت یک فایل
+function buildFileAdminKb(meta) {
+  const t = meta.token;
+  return kb([
+    [ { text: meta.disabled ? '✅ فعال‌سازی' : '⛔️ غیرفعال‌سازی', callback_data: `file_toggle_disable:${t}` } ],
+    [ { text: '💰 تنظیم قیمت', callback_data: `file_set_price:${t}` }, { text: '👥 محدودیت یکتا', callback_data: `file_set_limit:${t}` } ],
+    [ { text: '♻️ جایگزینی فایل', callback_data: `file_replace:${t}` } ],
+    [ { text: '🔙 بازگشت', callback_data: 'back_main' } ],
+  ]);
+}
 
 // ارسال فایل به کاربر با رعایت قوانین قیمت/محدودیت
 async function deliverFileToUser(env, uid, chat_id, token) {
@@ -76,8 +87,17 @@ async function deliverFileToUser(env, uid, chat_id, token) {
       meta.users = users;
       await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
     }
-    // ارسال سند از طریق تلگرام
-    await tgSendDocument(env, chat_id, meta.file_id, { caption: `📄 ${meta.file_name || ''}` });
+    // ارسال محتوا بر اساس نوع
+    const kind = meta.kind || 'document';
+    if (kind === 'photo') {
+      await tgSendPhoto(env, chat_id, meta.file_id, { caption: `🖼 ${meta.file_name || ''}` });
+    } else if (kind === 'text') {
+      const content = meta.text || meta.file_name || '—';
+      await tgSendMessage(env, chat_id, `📄 محتوا:
+${content}`);
+    } else {
+      await tgSendDocument(env, chat_id, meta.file_id, { caption: `📄 ${meta.file_name || ''}` });
+    }
     return true;
   } catch (e) {
     console.error('deliverFileToUser error', e);
@@ -99,6 +119,42 @@ async function tgSendPhoto(env, chat_id, file_id_or_url, opts = {}) {
   } catch (e) { console.error('tgSendPhoto error', e); return null; }
 }
 
+function buildPurchaseCaption(p) {
+  const lines = [];
+  lines.push('💸 <b>درخواست خرید سکه</b>');
+  lines.push(`👤 کاربر: <code>${p.user_id}</code>`);
+  lines.push(`🪙 پلن: <b>${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
+  lines.push(`💰 مبلغ: <b>${p.amount_label}</b>`);
+  lines.push(`🆔 شناسه: <code>${p.id}</code>`);
+  if (p.status && p.status !== 'pending') {
+    const st = p.status === 'approved' ? '✅ تایید شد' : '❌ رد شد';
+    lines.push('');
+    lines.push(st);
+    if (p.reason && p.status === 'rejected') lines.push(`دلیل: ${p.reason}`);
+  }
+  return lines.join('\n');
+}
+
+async function tgEditMessageCaption(env, chat_id, message_id, caption, opts = {}) {
+  try {
+    const body = { chat_id, message_id, caption, parse_mode: 'HTML', ...opts };
+    const res = await fetch(tgApiUrl('editMessageCaption', env), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    return await res.json();
+  } catch (e) { console.error('tgEditMessageCaption error', e); return null; }
+}
+
+async function tgEditReplyMarkup(env, chat_id, message_id, reply_markup) {
+  try {
+    const body = { chat_id, message_id, reply_markup };
+    const res = await fetch(tgApiUrl('editMessageReplyMarkup', env), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+    });
+    return await res.json();
+  } catch (e) { console.error('tgEditReplyMarkup error', e); return null; }
+}
+
 async function handleTokenRedeem(env, uid, chat_id, token) {
   try {
     const t = String(token || '').trim();
@@ -106,10 +162,19 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
       await tgSendMessage(env, chat_id, 'توکن نامعتبر است. یک توکن ۶ کاراکتری ارسال کنید.');
       return;
     }
-    const ok = await deliverFileToUser(env, uid, chat_id, t);
-    if (ok) {
-      await clearUserState(env, uid);
+    const meta = await kvGet(env, CONFIG.FILE_PREFIX + t);
+    if (!meta || meta.disabled) { await tgSendMessage(env, chat_id, 'فایل یافت نشد یا غیرفعال است.'); return; }
+    const users = Array.isArray(meta.users) ? meta.users : [];
+    const isOwner = String(meta.owner_id) === String(uid);
+    const price = Number(meta.price || 0);
+    const already = users.includes(String(uid));
+    if (!already && price > 0 && !isOwner) {
+      const kbBuy = kb([[{ text: `✅ تایید (کسر ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY})`, callback_data: 'confirm_buy:' + t }], [{ text: '❌ انصراف', callback_data: 'cancel_buy' }]]);
+      await tgSendMessage(env, chat_id, `این فایل برای دریافت به <b>${fmtNum(price)}</b> ${CONFIG.DEFAULT_CURRENCY} نیاز دارد. آیا مایل به ادامه هستید؟`, kbBuy);
+      return;
     }
+    const ok = await deliverFileToUser(env, uid, chat_id, t);
+    if (ok) { await clearUserState(env, uid); }
   } catch (e) {
     console.error('handleTokenRedeem error', e);
   }
@@ -119,8 +184,8 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.5';
-  } catch { return '1.5'; }
+    return s?.bot_version || '1.6';
+  } catch { return '1.6'; }
 }
 
 // ------------------ Build main menu header text ------------------ //
@@ -171,10 +236,10 @@ async function autoCreditReferralIfNeeded(env, referrerId, referredId) {
 }
 
 // Ticket storage
-async function createTicket(env, uid, content) {
+async function createTicket(env, uid, content, type = 'general') {
   try {
     const id = newToken(10);
-    const t = { id, user_id: uid, content: String(content || ''), created_at: nowTs(), closed: false };
+    const t = { id, user_id: uid, content: String(content || ''), type, created_at: nowTs(), closed: false, replies: [], status: 'open' };
     await kvSet(env, CONFIG.TICKET_PREFIX + id, t);
     return t;
   } catch (e) { console.error('createTicket error', e); return null; }
@@ -192,6 +257,22 @@ async function listTickets(env, limit = 10) {
     return items.slice(0, limit);
   } catch (e) { console.error('listTickets error', e); return []; }
 }
+
+async function listTicketsByType(env, type, limit = 20) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.TICKET_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (v && (v.type || 'general') === type) items.push(v);
+    }
+    items.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    return items.slice(0, limit);
+  } catch (e) { console.error('listTicketsByType error', e); return []; }
+}
+
+async function getTicket(env, id) { return (await kvGet(env, CONFIG.TICKET_PREFIX + id)) || null; }
+async function saveTicket(env, t) { return kvSet(env, CONFIG.TICKET_PREFIX + t.id, t); }
 
 // Gift codes
 async function createGiftCode(env, amount) {
@@ -423,6 +504,20 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
               // لینک دعوت خصوصی یا ناشناس → امکان چک membership نیست؛ از این مورد صرف‌نظر می‌کنیم
               chat = '';
             }
+        if (state?.step === 'adm_ticket_reply' && state?.ticket_id && state?.target_uid) {
+          const replyText = (text || '').trim();
+          const t = await getTicket(env, state.ticket_id);
+          if (t) {
+            t.replies = Array.isArray(t.replies) ? t.replies : [];
+            t.replies.push({ from_admin: true, text: replyText, ts: nowTs() });
+            t.status = 'answered';
+            await saveTicket(env, t);
+            try { await tgSendMessage(env, state.target_uid, `📩 پاسخ پشتیبانی:\n${replyText}`); } catch {}
+          }
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, 'پاسخ ارسال شد.');
+          return;
+        }
           } catch {
             chat = '';
           }
@@ -431,6 +526,22 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
         } else {
           chat = `@${ch}`;
         }
+
+    // تایید یا لغو خرید فایل پولی با توکن
+    if (data.startsWith('confirm_buy:')) {
+      const t = data.split(':')[1];
+      await tgAnswerCallbackQuery(env, cb.id);
+      const ok = await deliverFileToUser(env, uid, chat_id, t);
+      if (!ok) {
+        await tgSendMessage(env, chat_id, 'دریافت فایل انجام نشد.');
+      }
+      return;
+    }
+    if (data === 'cancel_buy') {
+      await tgAnswerCallbackQuery(env, cb.id, 'لغو شد');
+      await tgSendMessage(env, chat_id, 'دریافت فایل لغو شد.');
+      return;
+    }
 
         // اگر قابل بررسی نبود، از این کانال عبور می‌کنیم
         if (!chat) continue;
@@ -446,6 +557,17 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
           await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
         }
         return false;
+      }
+    }
+
+    // پشتیبانی از متن/لینک در فلو آپلود ادمین
+    if (text && isAdminUser(env, uid)) {
+      const st2 = await getUserState(env, uid);
+      if (st2?.step === 'adm_upload_wait_file') {
+        const tmp = { kind: 'text', text, file_name: (text.length > 40 ? text.slice(0, 40) + '…' : text), file_size: text.length, mime_type: 'text/plain' };
+        await setUserState(env, uid, { step: 'adm_upload_price', tmp });
+        await tgSendMessage(env, chat_id, '💰 قیمت فایل به سکه را ارسال کنید (مثلاً 10):');
+        return;
       }
     }
     return true;
@@ -674,6 +796,16 @@ async function onMessage(msg, env) {
 
     // دستورات متنی
     const text = msg.text || msg.caption || '';
+    // Admin: /who <user_id>
+    if (text.startsWith('/who')) {
+      if (!isAdminUser(env, uid)) { await tgSendMessage(env, chat_id, 'این دستور فقط برای مدیران است.'); return; }
+      const parts = text.trim().split(/\s+/);
+      const target = parts[1];
+      if (!target || !/^\d+$/.test(target)) { await tgSendMessage(env, chat_id, 'کاربرد: /who <user_id>'); return; }
+      const report = await buildUserReport(env, String(target));
+      await tgSendMessage(env, chat_id, report);
+      return;
+    }
     if (text.startsWith('/start')) {
       await sendWelcome(chat_id, uid, env, msg);
       return;
@@ -704,14 +836,15 @@ async function onMessage(msg, env) {
           status: 'pending',
           ts: nowTs(),
         };
+        p.admin_msgs = [];
         await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
         const admins = getAdminChatIds(env);
         const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
-        const info = `درخواست خرید سکه\nکاربر: ${uid}\nپلن: ${p.coins} ${CONFIG.DEFAULT_CURRENCY}\nمبلغ: ${p.amount_label}\nشناسه: ${purchaseId}`;
         for (const aid of admins) {
-          await tgSendMessage(env, aid, info);
-          await tgSendPhoto(env, aid, largest.file_id, { caption, reply_markup: adminKb.reply_markup });
+          const res = await tgSendPhoto(env, aid, largest.file_id, { caption: buildPurchaseCaption(p), reply_markup: adminKb.reply_markup });
+          const mid = res?.result?.message_id; if (mid) p.admin_msgs.push({ chat_id: String(aid), message_id: mid });
         }
+        await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
         await clearUserState(env, uid);
         await tgSendMessage(env, chat_id, 'رسید شما دریافت شد. در حال بررسی توسط پشتیبانی ✅', kbAdminInfo);
         return;
@@ -728,14 +861,15 @@ async function onMessage(msg, env) {
           status: 'pending',
           ts: nowTs(),
         };
+        p.admin_msgs = [];
         await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
         const admins = getAdminChatIds(env);
         const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
-        const info = `درخواست خرید سکه\nکاربر: ${uid}\nپلن: ${p.coins} ${CONFIG.DEFAULT_CURRENCY}\nمبلغ: ${p.amount_label}\nشناسه: ${purchaseId}`;
         for (const aid of admins) {
-          await tgSendMessage(env, aid, info);
-          await tgSendDocument(env, aid, msg.document.file_id, { caption, reply_markup: adminKb.reply_markup });
+          const res = await tgSendDocument(env, aid, msg.document.file_id, { caption: buildPurchaseCaption(p), reply_markup: adminKb.reply_markup });
+          const mid = res?.result?.message_id; if (mid) p.admin_msgs.push({ chat_id: String(aid), message_id: mid });
         }
+        await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
         await clearUserState(env, uid);
         await tgSendMessage(env, chat_id, 'رسید شما دریافت شد. در حال بررسی توسط پشتیبانی ✅', kbAdminInfo);
         return;
@@ -744,8 +878,8 @@ async function onMessage(msg, env) {
       return;
     }
 
-    // دریافت فایل (Document)
-    if (msg.document) {
+    // دریافت فایل (Document/Photo/Video/Audio) در حالت آپلود ادمین
+    if (msg.document || msg.photo || msg.video || msg.audio) {
       // بررسی فعال بودن سرویس
       const settings = await getSettings(env);
       const enabled = settings?.service_enabled !== false;
@@ -754,44 +888,56 @@ async function onMessage(msg, env) {
         return;
       }
       
-      // اگر ادمین در فلو آپلود است
+      // اگر ادمین در فلو آپلود است (پشتیبانی از فایل‌های مختلف)
       const st = await getUserState(env, uid);
       if (isAdminUser(env, uid) && st?.step === 'adm_upload_wait_file') {
-        const tmp = {
-          file_id: msg.document.file_id,
-          file_name: msg.document.file_name || 'file',
-          file_size: msg.document.file_size || 0,
-          mime_type: msg.document.mime_type || 'application/octet-stream',
-        };
+        let tmp = null;
+        if (msg.document) {
+          tmp = {
+            kind: 'document',
+            file_id: msg.document.file_id,
+            file_name: msg.document.file_name || 'file',
+            file_size: msg.document.file_size || 0,
+            mime_type: msg.document.mime_type || 'application/octet-stream',
+          };
+        } else if (msg.photo && msg.photo.length) {
+          const largest = msg.photo[msg.photo.length - 1];
+          tmp = { kind: 'photo', file_id: largest.file_id, file_name: 'photo', file_size: largest.file_size || 0, mime_type: 'image/jpeg' };
+        } else if (msg.video) {
+          tmp = { kind: 'video', file_id: msg.video.file_id, file_name: msg.video.file_name || 'video', file_size: msg.video.file_size || 0, mime_type: msg.video.mime_type || 'video/mp4' };
+        } else if (msg.audio) {
+          tmp = { kind: 'audio', file_id: msg.audio.file_id, file_name: msg.audio.file_name || 'audio', file_size: msg.audio.file_size || 0, mime_type: msg.audio.mime_type || 'audio/mpeg' };
+        }
+        if (!tmp) { await tgSendMessage(env, chat_id, 'نوع فایل پشتیبانی نمی‌شود.'); return; }
         await setUserState(env, uid, { step: 'adm_upload_price', tmp });
         await tgSendMessage(env, chat_id, '💰 قیمت فایل به سکه را ارسال کنید (مثلاً 10):');
         return;
       }
 
-      const token = newToken(6);
-      const meta = {
-        token,
-        owner_id: uid,
-        file_id: msg.document.file_id,
-        file_name: msg.document.file_name || 'file',
-        file_size: msg.document.file_size || 0,
-        mime_type: msg.document.mime_type || 'application/octet-stream',
-        created_at: nowTs(),
-        referrer_id: extractReferrerFromStartParam(msg) || '',
-        disabled: false,
-        price: 0,
-        max_users: 0,
-        users: [],
-      };
-      await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
-      await bumpStat(env, 'files');
-
-      const base = await getBaseUrlFromBot(env);
-      const link = `${base}/f/${token}?uid=${uid}${meta.referrer_id ? `&ref=${encodeURIComponent(meta.referrer_id)}` : ''}`;
-      const botUser = await getBotUsername(env);
-      const deepLink = botUser ? `https://t.me/${botUser}?start=${token}` : '';
-      await tgSendMessage(env, chat_id, `فایل شما ذخیره شد ✅\nنام: <b>${htmlEscape(meta.file_name)}</b>\nحجم: <b>${fmtNum(meta.file_size)} بایت</b>\n\nلینک دریافت مستقیم: ${link}${deepLink ? `\nلینک دعوت دریافت در ربات: ${deepLink}` : ''}`);
-      return;
+      // در حالت عادی (آپلود کاربر عادی با Document و ...)
+      if (msg.document && !isAdminUser(env, uid)) {
+        const token = newToken(6);
+        const meta = {
+          token,
+          owner_id: uid,
+          file_id: msg.document.file_id,
+          file_name: msg.document.file_name || 'file',
+          file_size: msg.document.file_size || 0,
+          mime_type: msg.document.mime_type || 'application/octet-stream',
+          created_at: nowTs(),
+          referrer_id: extractReferrerFromStartParam(msg) || '',
+          disabled: false,
+          price: 0,
+          max_users: 0,
+          users: [],
+        };
+        await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+        await bumpStat(env, 'files');
+        const botUser = await getBotUsername(env);
+        const deepLink = botUser ? `https://t.me/${botUser}?start=${token}` : '';
+        await tgSendMessage(env, chat_id, `فایل شما ذخیره شد ✅\nنام: <b>${htmlEscape(meta.file_name)}</b>\nحجم: <b>${fmtNum(meta.file_size)} بایت</b>\n\nتوکن دریافت: <code>${token}</code>${deepLink ? `\nلینک دعوت دریافت در ربات: <code>${deepLink}</code>` : ''}`);
+        return;
+      }
     }
 
     // سایر متن‌ها → نمایش منو و مدیریت stateها
@@ -810,7 +956,8 @@ async function onMessage(msg, env) {
       }
       if (state?.step === 'ticket_wait') {
         const content = text.trim();
-        await createTicket(env, uid, content);
+        const ttype = state?.type || 'general';
+        await createTicket(env, uid, content, ttype);
         await tgSendMessage(env, chat_id, '✅ تیکت شما ثبت شد.');
         await clearUserState(env, uid);
         return;
@@ -831,10 +978,12 @@ async function onMessage(msg, env) {
         const meta = {
           token,
           owner_id: uid,
+          kind: tmp.kind || 'document',
           file_id: tmp.file_id,
           file_name: tmp.file_name,
           file_size: tmp.file_size,
           mime_type: tmp.mime_type,
+          text: tmp.kind === 'text' ? (tmp.text || '') : undefined,
           created_at: nowTs(),
           referrer_id: extractReferrerFromStartParam(msg) || '',
           disabled: false,
@@ -844,11 +993,9 @@ async function onMessage(msg, env) {
         };
         await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
         await clearUserState(env, uid);
-        const base = await getBaseUrlFromBot(env);
-        const link = `${base}/f/${token}?uid=${uid}`;
         const botUser = await getBotUsername(env);
         const deepLink = botUser ? `https://t.me/${botUser}?start=${token}` : '';
-        await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nلینک مستقیم: ${link}${deepLink ? `\nلینک دعوت دریافت در ربات: ${deepLink}` : ''}`);
+        await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nتوکن دریافت: <code>${token}</code>${deepLink ? `\nلینک دعوت دریافت در ربات: <code>${deepLink}</code>` : ''}` , buildFileAdminKb(meta));
         return;
       }
       // Admin flows
@@ -919,10 +1066,68 @@ async function onMessage(msg, env) {
           if (p && p.status === 'pending') {
             p.status = 'rejected'; p.reason = reason; p.decided_at = nowTs();
             await kvSet(env, key, p);
+            // به‌روزرسانی پیام‌های ادمین: کپشن و حذف دکمه‌ها
+            const msgs = Array.isArray(p.admin_msgs) ? p.admin_msgs : [];
+            for (const m of msgs) {
+              try {
+                await tgEditMessageCaption(env, m.chat_id, m.message_id, buildPurchaseCaption(p), {});
+                await tgEditReplyMarkup(env, m.chat_id, m.message_id, kb([[{ text: '❌ رد شد', callback_data: 'noop' }]]).reply_markup);
+              } catch {}
+            }
             try { await tgSendMessage(env, state.target_uid, `❌ خرید شما رد شد.\nدلیل: ${reason}`); } catch {}
           }
           await clearUserState(env, uid);
           await tgSendMessage(env, chat_id, 'دلیل رد برای کاربر ارسال شد.');
+          return;
+        }
+        if (state?.step === 'file_set_price_wait' && state?.token) {
+          const amount = Number((text || '').replace(/[^0-9]/g, ''));
+          const key = CONFIG.FILE_PREFIX + state.token;
+          const meta = await kvGet(env, key);
+          if (!meta) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'فایل یافت نشد.'); return; }
+          meta.price = amount >= 0 ? amount : 0;
+          await kvSet(env, key, meta);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `قیمت به ${fmtNum(meta.price)} ${CONFIG.DEFAULT_CURRENCY} تنظیم شد.`, buildFileAdminKb(meta));
+          return;
+        }
+        if (state?.step === 'file_set_limit_wait' && state?.token) {
+          const maxUsers = Number((text || '').replace(/[^0-9]/g, ''));
+          const key = CONFIG.FILE_PREFIX + state.token;
+          const meta = await kvGet(env, key);
+          if (!meta) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'فایل یافت نشد.'); return; }
+          meta.max_users = maxUsers >= 0 ? maxUsers : 0;
+          await kvSet(env, key, meta);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `محدودیت یکتا به ${meta.max_users} تنظیم شد.`, buildFileAdminKb(meta));
+          return;
+        }
+        if (state?.step === 'file_replace_wait' && state?.token) {
+          // انتظار برای رسانه یا سند جدید
+          if (msg.document || msg.photo || msg.video || msg.audio) {
+            let upd = null;
+            if (msg.document) {
+              upd = { kind: 'document', file_id: msg.document.file_id, file_name: msg.document.file_name || 'file', file_size: msg.document.file_size || 0, mime_type: msg.document.mime_type || 'application/octet-stream' };
+            } else if (msg.photo && msg.photo.length) {
+              const largest = msg.photo[msg.photo.length - 1];
+              upd = { kind: 'photo', file_id: largest.file_id, file_name: 'photo', file_size: largest.file_size || 0, mime_type: 'image/jpeg' };
+            } else if (msg.video) {
+              upd = { kind: 'video', file_id: msg.video.file_id, file_name: msg.video.file_name || 'video', file_size: msg.video.file_size || 0, mime_type: msg.video.mime_type || 'video/mp4' };
+            } else if (msg.audio) {
+              upd = { kind: 'audio', file_id: msg.audio.file_id, file_name: msg.audio.file_name || 'audio', file_size: msg.audio.file_size || 0, mime_type: msg.audio.mime_type || 'audio/mpeg' };
+            }
+            if (upd) {
+              const key = CONFIG.FILE_PREFIX + state.token;
+              const meta = await kvGet(env, key);
+              if (!meta) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'فایل یافت نشد.'); return; }
+              meta.kind = upd.kind; meta.file_id = upd.file_id; meta.file_name = upd.file_name; meta.file_size = upd.file_size; meta.mime_type = upd.mime_type;
+              await kvSet(env, key, meta);
+              await clearUserState(env, uid);
+              await tgSendMessage(env, chat_id, 'فایل با موفقیت جایگزین شد.', buildFileAdminKb(meta));
+              return;
+            }
+          }
+          await tgSendMessage(env, chat_id, 'لطفاً فایل جدید را به صورت سند/رسانه ارسال کنید.');
           return;
         }
       }
@@ -940,6 +1145,17 @@ async function onCallback(cb, env) {
     const uid = String(from.id);
     const chat_id = cb.message?.chat?.id;
     const mid = cb.message?.message_id;
+
+    // اگر دکمه‌ها در تنظیمات غیرفعال شده‌اند، برای همه کاربران (به جز چند مسیر ضروری) پیام اطلاع بده
+    try {
+      const s = await getSettings(env);
+      const whitelist = ['join_check', 'back_main', 'adm_service', 'adm_service_toggle', 'adm_buttons_toggle'];
+      if (s?.buttons_disabled === true && !isAdminUser(env, uid) && !whitelist.includes(data)) {
+        await tgAnswerCallbackQuery(env, cb.id, 'غیرفعال است');
+        await tgSendMessage(env, chat_id, s.disabled_message || '🔧 دکمه‌ها موقتاً غیرفعال هستند.');
+        return;
+      }
+    } catch {}
 
     // Mandatory join check
     const joined = await ensureJoinedChannels(env, uid, chat_id);
@@ -1084,8 +1300,16 @@ async function onCallback(cb, env) {
     }
 
     if (data === 'ticket_new') {
-      await setUserState(env, uid, { step: 'ticket_wait' });
-      await tgSendMessage(env, chat_id, '🎫 لطفاً متن تیکت خود را ارسال کنید. /update برای لغو');
+      // انتخاب نوع تیکت
+      const kbTypes = kb([[{ text: '📄 عمومی', callback_data: 'ticket_type:general' }, { text: '💳 پرداختی', callback_data: 'ticket_type:payment' }], [{ text: '🔙 بازگشت', callback_data: 'back_main' }]]);
+      await tgSendMessage(env, chat_id, 'نوع تیکت را انتخاب کنید:', kbTypes);
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data.startsWith('ticket_type:')) {
+      const ttype = data.split(':')[1];
+      await setUserState(env, uid, { step: 'ticket_wait', type: (ttype === 'payment' ? 'payment' : 'general') });
+      await tgEditMessage(env, chat_id, mid, '🎫 لطفاً متن تیکت خود را ارسال کنید. /update برای لغو', {});
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -1097,21 +1321,39 @@ async function onCallback(cb, env) {
       return;
     }
 
-    if (data === 'myfiles') {
-      if (!isAdminUser(env, uid)) { await tgAnswerCallbackQuery(env, cb.id, 'این بخش مخصوص مدیر است'); return; }
-      const files = await listFiles(env, 10);
-      if (files.length === 0) {
-        await tgEditMessage(env, chat_id, mid, 'فایلی وجود ندارد.', fmMenuKb());
-      } else {
-        let txt = '🗂 فهرست فایل‌ها:\n\n';
-        for (const f of files) {
-          txt += `• ${htmlEscape(f.file_name)} (${fmtNum(f.file_size)} بایت) — ${f.disabled ? 'غیرفعال' : 'فعال'}\n`;
+    if (data === 'myfiles' || data.startsWith('myfiles_p:')) {
+        if (!isAdminUser(env, uid)) { await tgAnswerCallbackQuery(env, cb.id, 'این بخش مخصوص مدیر است'); return; }
+        let page = 1;
+        if (data.startsWith('myfiles_p:')) { const p = parseInt(data.split(':')[1]||'1',10); if (!isNaN(p) && p>0) page = p; }
+        const pageSize = 10;
+        const all = await listUserFiles(env, uid, 1000);
+        if (all.length === 0) {
+          await tgEditMessage(env, chat_id, mid, '🗂 فایلی وجود ندارد.', fmMenuKb());
+        } else {
+          const totalPages = Math.max(1, Math.ceil(all.length / pageSize));
+          if (page > totalPages) page = totalPages;
+          const start = (page-1)*pageSize;
+          const slice = all.slice(start, start+pageSize);
+          const rows = slice.map(f => ([{ text: `مدیریت: ${f.file_name.slice(0,30)}`, callback_data: 'file_manage:' + f.token }]));
+          const nav = [];
+          if (page>1) nav.push({ text: '⬅️ قبلی', callback_data: 'myfiles_p:'+(page-1) });
+          if (page<totalPages) nav.push({ text: 'بعدی ➡️', callback_data: 'myfiles_p:'+(page+1) });
+          if (nav.length) rows.push(nav);
+          rows.push([{ text: '🔙 بازگشت', callback_data: 'back_main' }]);
+          await tgEditMessage(env, chat_id, mid, `🗂 فایل‌های شما — صفحه ${page}/${totalPages} — یک مورد را برای مدیریت انتخاب کنید:`, kb(rows));
         }
-        await tgEditMessage(env, chat_id, mid, txt, fmMenuKb());
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
       }
-      await tgAnswerCallbackQuery(env, cb.id);
-      return;
-    }
+      if (data.startsWith('file_manage:')) {
+        const token = data.split(':')[1];
+        const meta = await kvGet(env, CONFIG.FILE_PREFIX + token);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'در دسترس نیست'); return; }
+        const info = [`نام: <b>${htmlEscape(meta.file_name)}</b>`,`قیمت: <b>${fmtNum(meta.price||0)}</b> ${CONFIG.DEFAULT_CURRENCY}`,`محدودیت یکتا: <b>${meta.max_users||0}</b>`,`توکن: <code>${meta.token}</code>`].join('\n');
+        await tgEditMessage(env, chat_id, mid, info, buildFileAdminKb(meta));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
 
     if (data === 'update') {
       await clearUserState(env, uid);
@@ -1132,8 +1374,17 @@ async function onCallback(cb, env) {
       if (data === 'adm_service') {
         const s = await getSettings(env);
         const enabled = s?.service_enabled !== false;
-        const txt = `⚙️ تنظیمات سرویس\nوضعیت فعلی: ${enabled ? 'فعال' : 'غیرفعال'}`;
-        const kbSrv = kb([[{ text: enabled ? '🟡 غیرفعال کردن سرویس' : '🟢 فعال کردن سرویس', callback_data: 'adm_service_toggle' }], [{ text: '🔙 بازگشت', callback_data: 'back_main' }]]);
+        const btns = [
+          [{ text: enabled ? ' غیرفعال کردن سرویس' : ' فعال کردن سرویس', callback_data: 'adm_service_toggle' }],
+        ];
+        try {
+          const s2 = s || {};
+          const disabled = s2.buttons_disabled === true;
+          btns.push([{ text: disabled ? ' فعال کردن دکمه‌ها' : ' غیرفعال کردن دکمه‌ها', callback_data: 'adm_buttons_toggle' }]);
+        } catch {}
+        btns.push([{ text: ' بازگشت', callback_data: 'admin' }]);
+        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nوضعیت دکمه‌ها: ${(s?.buttons_disabled===true)?'غیرفعال':'فعال'}`;
+        const kbSrv = kb(btns);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
         await tgAnswerCallbackQuery(env, cb.id);
         return;
@@ -1142,10 +1393,44 @@ async function onCallback(cb, env) {
         const s = await getSettings(env);
         s.service_enabled = s?.service_enabled === false ? true : false;
         await setSettings(env, s);
-        const txt = `⚙️ تنظیمات سرویس\nوضعیت فعلی: ${s.service_enabled !== false ? 'فعال' : 'غیرفعال'}`;
-        const kbSrv = kb([[{ text: s.service_enabled !== false ? '🟡 غیرفعال کردن سرویس' : '🟢 فعال کردن سرویس', callback_data: 'adm_service_toggle' }], [{ text: '🔙 بازگشت', callback_data: 'back_main' }]]);
+        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${s.service_enabled !== false ? 'فعال' : 'غیرفعال'}\nوضعیت دکمه‌ها: ${(s?.buttons_disabled===true)?'غیرفعال':'فعال'}`;
+        const kbSrv = kb([[
+          { text: s.service_enabled !== false ? ' غیرفعال کردن سرویس' : ' فعال کردن سرویس', callback_data: 'adm_service_toggle' }
+        ],[
+          { text: (s?.buttons_disabled===true) ? ' فعال کردن دکمه‌ها' : ' غیرفعال کردن دکمه‌ها', callback_data: 'adm_buttons_toggle' }
+        ],[
+          { text: ' بازگشت', callback_data: 'admin' }
+        ]]);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
         await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        return;
+      }
+      if (data === 'adm_buttons_toggle') {
+        const s = await getSettings(env);
+        s.buttons_disabled = s?.buttons_disabled === true ? false : true;
+        await setSettings(env, s);
+        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${s.service_enabled !== false ? 'فعال' : 'غیرفعال'}\nوضعیت دکمه‌ها: ${(s?.buttons_disabled===true)?'غیرفعال':'فعال'}`;
+        const kbSrv = kb([[
+          { text: s.service_enabled !== false ? ' غیرفعال کردن سرویس' : ' فعال کردن سرویس', callback_data: 'adm_service_toggle' }
+        ],[
+          { text: (s?.buttons_disabled===true) ? ' فعال کردن دکمه‌ها' : ' غیرفعال کردن دکمه‌ها', callback_data: 'adm_buttons_toggle' }
+        ],[
+          { text: ' بازگشت', callback_data: 'admin' }
+        ]]);
+        await tgEditMessage(env, chat_id, mid, txt, kbSrv);
+        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        return;
+      }
+      if (data === 'adm_add') {
+        await setUserState(env, uid, { step: 'adm_add_uid' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'آیدی عددی کاربر را ارسال کنید:');
+        return;
+      }
+      if (data === 'adm_sub') {
+        await setUserState(env, uid, { step: 'adm_sub_uid' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'آیدی عددی کاربر را ارسال کنید:');
         return;
       }
       if (data.startsWith('buy_approve:')) {
@@ -1156,7 +1441,15 @@ async function onCallback(cb, env) {
         const ok = await creditBalance(env, String(p.user_id), Number(p.coins || 0));
         if (ok) {
           p.status = 'approved'; p.decided_at = nowTs(); await kvSet(env, key, p);
-          try { await tgSendMessage(env, String(p.user_id), `✅ ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد. سپاس از پرداخت شما.`); } catch {}
+          // Update admin messages: caption and keyboard
+          const msgs = Array.isArray(p.admin_msgs) ? p.admin_msgs : [];
+          for (const m of msgs) {
+            try {
+              await tgEditMessageCaption(env, m.chat_id, m.message_id, buildPurchaseCaption(p), {});
+              await tgEditReplyMarkup(env, m.chat_id, m.message_id, kb([[{ text: ' تایید شد', callback_data: 'noop' }]]).reply_markup);
+            } catch {}
+          }
+          try { await tgSendMessage(env, String(p.user_id), ` ${fmtNum(p.coins)}  به حساب شما افزوده شد. سپاس از پرداخت شما.`); } catch {}
           await tgAnswerCallbackQuery(env, cb.id, 'واریز شد');
         } else {
           await tgAnswerCallbackQuery(env, cb.id, 'خطا در واریز');
@@ -1175,7 +1468,7 @@ async function onCallback(cb, env) {
       }
       if (data === 'adm_upload') {
         await setUserState(env, uid, { step: 'adm_upload_wait_file' });
-        await tgEditMessage(env, chat_id, mid, '⬆️ فایل خود را به صورت Document ارسال کنید تا بارگذاری شود.', {});
+        await tgEditMessage(env, chat_id, mid, ' هر نوع محتوا را ارسال کنید: سند/عکس/ویدیو/صوت یا حتی متن/لینک. سپس قیمت و محدودیت را تنظیم می‌کنیم.', {});
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -1192,7 +1485,7 @@ async function onCallback(cb, env) {
         const users = fmtNum(stats.users || 0);
         const files = fmtNum(stats.files || 0);
         const updates = fmtNum(stats.updates || 0);
-        const txt = `📊 آمار ربات\nکاربران: ${users}\nفایل‌ها: ${files}\nبه‌روزرسانی‌ها: ${updates}`;
+        const txt = ` آمار ربات\nکاربران: ${users}\nفایل‌ها: ${files}\nبه‌روزرسانی‌ها: ${updates}`;
         await tgAnswerCallbackQuery(env, cb.id);
         await tgEditMessage(env, chat_id, mid, txt, adminMenuKb(await getSettings(env)));
         return;
@@ -1201,14 +1494,14 @@ async function onCallback(cb, env) {
         const s = await getSettings(env);
         const current = Array.isArray(s.join_channels) ? s.join_channels.join(', ') : '';
         await setUserState(env, uid, { step: 'adm_join_wait' });
-        const txt = `📢 تنظیم جویین اجباری\nکانال‌های فعلی: ${current || '—'}\n\nلطفاً یک کانال یا لینک در هر پیام ارسال کنید.\nنمونه‌ها: @channel یا -100xxxxxxxxxx یا لینک کامل https://t.me/xxxx`;
+        const txt = ` تنظیم جویین اجباری\nکانال‌های فعلی: ${current || '—'}\n\nلطفاً یک کانال یا لینک در هر پیام ارسال کنید.\nنمونه‌ها: @channel یا -100xxxxxxxxxx یا لینک کامل https://t.me/xxxx`;
         await tgEditMessage(env, chat_id, mid, txt, {});
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data === 'adm_files') {
         const files = await listFiles(env, 10);
-        let txt = '🗂 ۱۰ فایل اخیر:\n\n';
+        let txt = ' ۱۰ فایل اخیر:\n\n';
         for (const f of files) {
           txt += `• ${htmlEscape(f.file_name)} (${fmtNum(f.file_size)} بایت) — ${f.disabled ? 'غیرفعال' : 'فعال'}\n`;
         }
@@ -1218,7 +1511,7 @@ async function onCallback(cb, env) {
       }
       if (data === 'help') {
         const lines = [
-          '📘 راهنمای دستورات',
+          ' راهنمای دستورات',
           '',
           'دستورات عمومی:',
           '/start — شروع و نمایش منوی اصلی',
@@ -1416,9 +1709,86 @@ async function listFiles(env, limit = 10) {
   } catch (e) { console.error('listFiles error', e); return []; }
 }
 
+async function listFilesReceivedByUser(env, uid, limit = 10) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.FILE_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) {
+      const f = await kvGet(env, k.name);
+      if (f && Array.isArray(f.users) && f.users.includes(String(uid))) items.push(f);
+    }
+    items.sort((a, b) => (b?.created_at || 0) - (a?.created_at || 0));
+    return items.slice(0, limit);
+  } catch (e) { console.error('listFilesReceivedByUser error', e); return []; }
+}
+
+async function listPurchasesByUser(env, uid, limit = 10) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.PURCHASE_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) {
+      const p = await kvGet(env, k.name);
+      if (p && String(p.user_id) === String(uid)) items.push(p);
+    }
+    items.sort((a, b) => (b?.ts || 0) - (a?.ts || 0));
+    return items.slice(0, limit);
+  } catch (e) { console.error('listPurchasesByUser error', e); return []; }
+}
+
+async function listDownloadsByUser(env, uid, limit = 10) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.DOWNLOAD_LOG_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (v && String(v.uid) === String(uid)) items.push(v);
+    }
+    items.sort((a, b) => (b?.ts || 0) - (a?.ts || 0));
+    return items.slice(0, limit);
+  } catch (e) { console.error('listDownloadsByUser error', e); return []; }
+}
+
+async function buildUserReport(env, targetUid) {
+  try {
+    const u = await getUser(env, targetUid);
+    if (!u) return 'کاربر یافت نشد';
+    const owned = await listUserFiles(env, targetUid, 100);
+    const received = await listFilesReceivedByUser(env, targetUid, 100);
+    const purchases = await listPurchasesByUser(env, targetUid, 20);
+    const downloads = await listDownloadsByUser(env, targetUid, 50);
+    const parts = [];
+    parts.push('👤 گزارش کاربر');
+    parts.push(`آیدی: <code>${targetUid}</code>`);
+    parts.push(`نام: <b>${htmlEscape(u.name || '-')}</b>`);
+    parts.push(`موجودی: <b>${fmtNum(u.balance || 0)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
+    if (u.referrer_id) parts.push(`معرف: <code>${u.referrer_id}</code>`);
+    if (u.ref_count) parts.push(`تعداد معرفی: <b>${fmtNum(u.ref_count)}</b>`);
+    parts.push('');
+    parts.push(`فایل‌های مالکیت‌دار: ${owned.length}`);
+    if (owned.length) parts.push('• ' + owned.slice(0, 5).map(f => `${htmlEscape(f.file_name)} (${f.token||''})`).join('\n• '));
+    parts.push('');
+    parts.push(`فایل‌های دریافتی: ${received.length}`);
+    if (received.length) parts.push('• ' + received.slice(0, 5).map(f => `${htmlEscape(f.file_name)} (${f.token||''})`).join('\n• '));
+    parts.push('');
+    const ap = purchases.filter(p => p.status === 'approved').length;
+    const rp = purchases.filter(p => p.status === 'rejected').length;
+    const pp = purchases.filter(p => p.status === 'pending').length;
+    parts.push(`خریدها: ${purchases.length} (تایید: ${ap}، رد: ${rp}، در انتظار: ${pp})`);
+    if (purchases.length) parts.push('• آخرین خرید: ' + `${purchases[0].coins||'-'} ${CONFIG.DEFAULT_CURRENCY} — ${purchases[0].amount_label||'-'} — ${purchases[0].status}`);
+    parts.push('');
+    parts.push(`دانلودها (لاگ): ${downloads.length}`);
+    return parts.join('\n');
+  } catch (e) {
+    console.error('buildUserReport error', e);
+    return 'خطا در تولید گزارش کاربر';
+  }
+}
+
 async function getSettings(env) {
   const s = (await kvGet(env, CONFIG.SERVICE_TOGGLE_KEY)) || {};
   if (typeof s.service_enabled === 'undefined') s.service_enabled = true;
+  if (typeof s.buttons_disabled === 'undefined') s.buttons_disabled = false;
+  if (!s.disabled_message) s.disabled_message = '🔧 دکمه‌ها موقتاً غیرفعال هستند و در حال توسعه می‌باشند.';
   return s;
 }
 async function setSettings(env, s) { return kvSet(env, CONFIG.SERVICE_TOGGLE_KEY, s); }
