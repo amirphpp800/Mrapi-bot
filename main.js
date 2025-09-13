@@ -196,8 +196,8 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '2.0';
-  } catch { return '2.0'; }
+    return s?.bot_version || '2.1';
+  } catch { return '2.1'; }
 }
 
 // ------------------ Build main menu header text ------------------ //
