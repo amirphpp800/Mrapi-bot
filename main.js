@@ -42,9 +42,51 @@ const CONFIG = {
   DOWNLOAD_LOG_PREFIX: 'dl:',
   GIFT_PREFIX: 'gift:',
   REDEEM_PREFIX: 'redeem:',
+  REF_PENDING_PREFIX: 'ref:pending:',
+  REF_DONE_PREFIX: 'ref:done:',
 };
 
 // صفحات فانکشنز env: { BOT_KV }
+
+// Referral helpers (pending approval)
+async function createPendingReferral(env, referrerId, referredId) {
+  try {
+    if (!referrerId || !referredId || String(referrerId) === String(referredId)) return false;
+    const doneKey = CONFIG.REF_DONE_PREFIX + String(referredId);
+    const done = await kvGet(env, doneKey);
+    if (done) return false; // already done
+    const pendKey = CONFIG.REF_PENDING_PREFIX + String(referredId);
+    const exists = await kvGet(env, pendKey);
+    if (exists) return true; // already pending
+    const rec = { referrer_id: String(referrerId), referred_id: String(referredId), ts: nowTs() };
+    await kvSet(env, pendKey, rec);
+    return true;
+  } catch (e) { console.error('createPendingReferral error', e); return false; }
+}
+
+async function listPendingReferrals(env, limit = 20) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.REF_PENDING_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) { const v = await kvGet(env, k.name); if (v) items.push(v); }
+    items.sort((a,b)=> (a.ts||0) - (b.ts||0));
+    return items.slice(0, limit);
+  } catch (e) { console.error('listPendingReferrals error', e); return []; }
+}
+
+async function approveReferral(env, referredId) {
+  try {
+    const pendKey = CONFIG.REF_PENDING_PREFIX + String(referredId);
+    const rec = await kvGet(env, pendKey);
+    if (!rec) return { ok:false, reason:'not_found' };
+    const amount = 1; // 1 coin upon approval
+    const credited = await creditBalance(env, String(rec.referred_id), amount);
+    if (!credited) return { ok:false, reason:'credit_failed' };
+    await kvDel(env, pendKey);
+    await kvSet(env, CONFIG.REF_DONE_PREFIX + String(referredId), { ts: nowTs(), amount });
+    return { ok:true, rec, amount };
+  } catch (e) { console.error('approveReferral error', e); return { ok:false, reason:'exception' }; }
+}
 
 // Ticket storage
 async function createTicket(env, uid, content) {
@@ -319,7 +361,7 @@ function isAdminUser(env, uid) {
 function mainMenuKb(env, uid) {
   const rows = [
     [ { text: '👤 حساب کاربری', callback_data: 'account' }, { text: '👥 معرفی دوستان', callback_data: 'referrals' } ],
-    [ { text: '🎟 کد هدیه', callback_data: 'giftcode' }, { text: '🔑 دریافت با توکن', callback_data: 'redeem_token' } ],
+    [ { text: '🎁 کد هدیه', callback_data: 'giftcode' }, { text: '🔑 دریافت با توکن', callback_data: 'redeem_token' } ],
     [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
   ];
   if (isAdminUser(env, uid)) {
@@ -341,7 +383,8 @@ function adminMenuKb(settings) {
   return kb([
     [ { text: enabled ? '🟢 سرویس فعال' : '🔴 سرویس غیرفعال', callback_data: 'adm_toggle' }, { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' } ],
     [ { text: '📊 آمار ربات', callback_data: 'adm_stats' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
-    [ { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' }, { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' } ],
+    [ { text: '⬆️ بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' } ],
+    [ { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' }, { text: '✅ تایید معرفی‌ها', callback_data: 'adm_refs' } ],
     [ { text: '➕ افزودن سکه', callback_data: 'adm_add' }, { text: '➖ کسر سکه', callback_data: 'adm_sub' } ],
   ]);
 }
@@ -413,6 +456,35 @@ async function handleFileDownload(request, env) {
     const dlKey = CONFIG.DOWNLOAD_LOG_PREFIX + token + ':' + nowTs();
     ctxlessWait(kvSet(env, dlKey, { uid, ref, ts: nowTs() }));
 
+    // سیاست قیمت و محدودیت کاربران منحصربه‌فرد
+    try {
+      // اگر محدودیت تعریف شده
+      const users = Array.isArray(meta.users) ? meta.users : [];
+      const maxUsers = Number(meta.max_users || 0);
+      const price = Number(meta.price || 0);
+      const isOwner = String(meta.owner_id) === String(uid);
+      const already = users.includes(String(uid));
+      if (!already && maxUsers > 0 && users.length >= maxUsers) {
+        return new Response('ظرفیت دریافت این فایل تکمیل شده است.', { status: 403 });
+      }
+      if (!already && price > 0 && !isOwner) {
+        const u = await getUser(env, String(uid));
+        if (!u || Number(u.balance || 0) < price) {
+          return new Response('موجودی شما برای دریافت فایل کافی نیست.', { status: 402 });
+        }
+        // کسر سکه و ثبت کاربر
+        u.balance = Number(u.balance || 0) - price;
+        await setUser(env, String(uid), u);
+      }
+      if (!already) {
+        users.push(String(uid));
+        meta.users = users;
+        await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+      }
+    } catch (e) {
+      console.error('pricing/limit enforcement error', e);
+    }
+
     // دریافت لینکی به فایل تلگرام
     const gf = await tgGetFile(env, meta.file_id);
     const file_path = gf?.result?.file_path;
@@ -463,7 +535,7 @@ async function onMessage(msg, env) {
     }
     if (text.startsWith('/update')) {
       await clearUserState(env, uid);
-      await tgSendMessage(env, chat_id, 'عملیات جاری لغو شد. منو اصلی:', mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, 'منو اصلی:', mainMenuKb(env, uid));
       return;
     }
 
@@ -474,6 +546,20 @@ async function onMessage(msg, env) {
       const enabled = settings?.service_enabled !== false;
       if (!enabled) {
         await tgSendMessage(env, chat_id, 'سرویس موقتاً غیرفعال است. لطفاً بعداً تلاش کنید.');
+        return;
+      }
+
+      // اگر ادمین در فلو آپلود است
+      const st = await getUserState(env, uid);
+      if (isAdminUser(env, uid) && st?.step === 'adm_upload_wait_file') {
+        const tmp = {
+          file_id: msg.document.file_id,
+          file_name: msg.document.file_name || 'file',
+          file_size: msg.document.file_size || 0,
+          mime_type: msg.document.mime_type || 'application/octet-stream',
+        };
+        await setUserState(env, uid, { step: 'adm_upload_price', tmp });
+        await tgSendMessage(env, chat_id, '💰 قیمت فایل به سکه را ارسال کنید (مثلاً 10):');
         return;
       }
 
@@ -488,6 +574,9 @@ async function onMessage(msg, env) {
         created_at: nowTs(),
         referrer_id: extractReferrerFromStartParam(msg) || '',
         disabled: false,
+        price: 0,
+        max_users: 0,
+        users: [],
       };
       await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
       await bumpStat(env, 'files');
@@ -517,6 +606,40 @@ async function onMessage(msg, env) {
         await createTicket(env, uid, content);
         await tgSendMessage(env, chat_id, '✅ تیکت شما ثبت شد.');
         await clearUserState(env, uid);
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_upload_price') {
+        const amount = Number(text.replace(/[^0-9]/g, ''));
+        const tmp = state.tmp || {};
+        if (!tmp.file_id) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'خطا. دوباره تلاش کنید.'); return; }
+        await setUserState(env, uid, { step: 'adm_upload_limit', tmp, price: amount >= 0 ? amount : 0 });
+        await tgSendMessage(env, chat_id, '🔢 محدودیت تعداد دریافت‌کنندگان یکتا را ارسال کنید (مثلاً 2). برای بدون محدودیت 0 بفرستید:');
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_upload_limit') {
+        const maxUsers = Number(text.replace(/[^0-9]/g, ''));
+        const tmp = state.tmp || {};
+        const price = Number(state.price || 0);
+        const token = newToken();
+        const meta = {
+          token,
+          owner_id: uid,
+          file_id: tmp.file_id,
+          file_name: tmp.file_name,
+          file_size: tmp.file_size,
+          mime_type: tmp.mime_type,
+          created_at: nowTs(),
+          referrer_id: extractReferrerFromStartParam(msg) || '',
+          disabled: false,
+          price: price >= 0 ? price : 0,
+          max_users: maxUsers >= 0 ? maxUsers : 0,
+          users: [],
+        };
+        await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+        await clearUserState(env, uid);
+        const base = await getBaseUrlFromBot(env);
+        const link = `${base}/f/${token}?uid=${uid}`;
+        await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nلینک: ${link}`);
         return;
       }
       // Admin flows
@@ -611,7 +734,13 @@ async function onCallback(cb, env) {
         [ { text: '🆘 پشتیبانی', url: 'https://t.me/NeoDebug' }, { text: '🎫 ارسال تیکت', callback_data: 'ticket_new' } ],
         [ { text: '🔙 بازگشت', callback_data: 'back_main' } ]
       ]);
-      await tgEditMessage(env, chat_id, mid, `👤 حساب کاربری\nآیدی: <code>${uid}</code>\nنام: <b>${htmlEscape(u?.name || '-')}</b>\nموجودی: <b>${bal} ${CONFIG.DEFAULT_CURRENCY}</b>`, kbAcc);
+      const txt = [
+        '👤 حساب کاربری',
+        `آیدی: <code>${uid}</code>`,
+        `نام: <b>${htmlEscape(u?.name || '-')}</b>`,
+        `موجودی: <b>${bal} ${CONFIG.DEFAULT_CURRENCY}</b>`,
+      ].join('\n');
+      await tgSendMessage(env, chat_id, txt, kbAcc);
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -622,21 +751,16 @@ async function onCallback(cb, env) {
       const botUser = env?.BOT_USERNAME || '';
       const suffix = uid;
       const link = botUser ? `https://t.me/${botUser}?start=${suffix}` : 'لینک در دسترس نیست (BOT_USERNAME را در env تنظیم کنید)';
-      await tgEditMessage(env, chat_id, mid, `👥 معرفی دوستان\nتعداد افراد معرفی‌شده: <b>${fmtNum(count)}</b>\nلینک دعوت: ${link}`, mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, `👥 معرفی دوستان\nتعداد افراد معرفی‌شده: <b>${fmtNum(count)}</b>\nلینک دعوت: ${link}`, {});
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
-    if (data === 'transfer') {
-      await setUserState(env, uid, { step: 'transfer_ask_target' });
-      await tgEditMessage(env, chat_id, mid, 'لطفاً آیدی عددی گیرنده را ارسال کنید. /update برای لغو', {});
-      await tgAnswerCallbackQuery(env, cb.id);
-      return;
-    }
+    // انتقال سکه برای کاربران حذف شد
 
     if (data === 'giftcode') {
       await setUserState(env, uid, { step: 'giftcode_wait' });
-      await tgEditMessage(env, chat_id, mid, '🎟 لطفاً کد هدیه را ارسال کنید. /update برای لغو', {});
+      await tgSendMessage(env, chat_id, '🎁 لطفاً کد هدیه را ارسال کنید. /update برای لغو');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -652,36 +776,34 @@ async function onCallback(cb, env) {
       const s = await getSettings(env);
       const price = s?.price_per_coin || 0;
       const info = price ? `قیمت هر سکه: <b>${fmtNum(price)}</b> تومان` : 'برای خرید سکه با پشتیبانی تماس بگیرید.';
-      await tgEditMessage(env, chat_id, mid, `🪙 خرید سکه\n${info}`, mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, `🪙 خرید سکه\n${info}`);
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
     if (data === 'ticket_new') {
       await setUserState(env, uid, { step: 'ticket_wait' });
-      await tgEditMessage(env, chat_id, mid, '🎫 لطفاً متن تیکت خود را ارسال کنید. /update برای لغو', {});
+      await tgSendMessage(env, chat_id, '🎫 لطفاً متن تیکت خود را ارسال کنید. /update برای لغو');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
     if (data === 'fm') {
+      if (!isAdminUser(env, uid)) { await tgAnswerCallbackQuery(env, cb.id, 'این بخش مخصوص مدیر است'); return; }
       await tgEditMessage(env, chat_id, mid, '📁 مدیریت فایل‌ها', fmMenuKb());
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
     if (data === 'myfiles') {
-      const files = await listUserFiles(env, uid, 10);
+      if (!isAdminUser(env, uid)) { await tgAnswerCallbackQuery(env, cb.id, 'این بخش مخصوص مدیر است'); return; }
+      const files = await listFiles(env, 10);
       if (files.length === 0) {
-        await tgEditMessage(env, chat_id, mid, 'شما فایلی ندارید.', fmMenuKb());
+        await tgEditMessage(env, chat_id, mid, 'فایلی وجود ندارد.', fmMenuKb());
       } else {
-        let txt = 'فایل‌های اخیر شما:\n\n';
-        const base = await getBaseUrlFromBot(env);
+        let txt = '🗂 فهرست فایل‌ها:\n\n';
         for (const f of files) {
-          const link = `${base}/f/${f.token}?uid=${uid}${f.referrer_id ? `&ref=${encodeURIComponent(f.referrer_id)}` : ''}`;
-          txt += `• <b>${htmlEscape(f.file_name)}</b> (${fmtNum(f.file_size)} بایت)\n${link}\n`;
-          if (f.disabled) txt += '— غیرفعال شده ❌\n';
-          txt += '\n';
+          txt += `• ${htmlEscape(f.file_name)} (${fmtNum(f.file_size)} بایت) — ${f.disabled ? 'غیرفعال' : 'فعال'}\n`;
         }
         await tgEditMessage(env, chat_id, mid, txt, fmMenuKb());
       }
@@ -691,7 +813,7 @@ async function onCallback(cb, env) {
 
     if (data === 'update') {
       await clearUserState(env, uid);
-      await tgEditMessage(env, chat_id, mid, 'عملیات جاری لغو شد. منو اصلی:', mainMenuKb(env, uid));
+      await tgEditMessage(env, chat_id, mid, 'منو اصلی:', mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -701,6 +823,12 @@ async function onCallback(cb, env) {
       if (data === 'admin') {
         const settings = await getSettings(env);
         await tgEditMessage(env, chat_id, mid, 'پنل مدیریت:', adminMenuKb(settings));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_upload') {
+        await setUserState(env, uid, { step: 'adm_upload_wait_file' });
+        await tgEditMessage(env, chat_id, mid, '⬆️ فایل خود را به صورت Document ارسال کنید تا بارگذاری شود.', {});
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -726,6 +854,37 @@ async function onCallback(cb, env) {
         const txt = `📊 آمار:\nبه‌روزرسانی‌ها: ${fmtNum(stats.updates || 0)}\nفایل‌ها: ${fmtNum(stats.files || 0)}`;
         await tgAnswerCallbackQuery(env, cb.id);
         await tgEditMessage(env, chat_id, mid, txt, adminMenuKb(await getSettings(env)));
+        return;
+      }
+      if (data === 'adm_refs') {
+        const items = await listPendingReferrals(env, 20);
+        if (items.length === 0) {
+          await tgEditMessage(env, chat_id, mid, 'مورد در انتطار تایید وجود ندارد.', adminMenuKb(await getSettings(env)));
+          await tgAnswerCallbackQuery(env, cb.id);
+          return;
+        }
+        // Build inline approve buttons
+        const rows = items.map(r => [{ text: `تایید ${r.referred_id}`, callback_data: `adm_ref_ok:${r.referred_id}` }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, '✅ تایید معرفی‌ها — موارد در انتظار:', { reply_markup: { inline_keyboard: rows } });
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_ref_ok:')) {
+        const referredId = data.split(':')[1];
+        const res = await approveReferral(env, referredId);
+        if (res.ok) {
+          // Notify referred user
+          try { await tgSendMessage(env, res.rec.referred_id, `🎉 معرفی شما تایید شد. 1 ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد.`); } catch {}
+          await tgAnswerCallbackQuery(env, cb.id, 'تایید شد');
+        } else {
+          await tgAnswerCallbackQuery(env, cb.id, 'ناموفق بود یا قبلاً تایید شده');
+        }
+        // Refresh refs list
+        const items = await listPendingReferrals(env, 20);
+        const rows = items.map(r => [{ text: `تایید ${r.referred_id}`, callback_data: `adm_ref_ok:${r.referred_id}` }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, '✅ تایید معرفی‌ها — موارد در انتظار:', { reply_markup: { inline_keyboard: rows } });
         return;
       }
       if (data === 'adm_files') {
@@ -756,16 +915,10 @@ async function onCallback(cb, env) {
 
 async function sendWelcome(chat_id, uid, env, msg) {
   try {
-    // Referral handling
+    // Referral handling (pending approval)
     const ref = extractReferrerFromStartParam(msg);
     if (ref && ref !== uid) {
-      try {
-        const ru = await getUser(env, String(ref));
-        if (ru) {
-          ru.ref_count = Number(ru.ref_count || 0) + 1;
-          await setUser(env, String(ref), ru);
-        }
-      } catch {}
+      await createPendingReferral(env, String(ref), String(uid));
     }
     // Force join if needed
     const joined = await ensureJoinedChannels(env, uid, chat_id);
