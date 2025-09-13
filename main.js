@@ -42,50 +42,51 @@ const CONFIG = {
   DOWNLOAD_LOG_PREFIX: 'dl:',
   GIFT_PREFIX: 'gift:',
   REDEEM_PREFIX: 'redeem:',
-  REF_PENDING_PREFIX: 'ref:pending:',
   REF_DONE_PREFIX: 'ref:done:',
 };
 
 // صفحات فانکشنز env: { BOT_KV }
 
-// Referral helpers (pending approval)
-async function createPendingReferral(env, referrerId, referredId) {
+// Get bot info (for auto-detecting username if BOT_USERNAME is not set)
+async function tgGetMe(env) {
+  try {
+    const res = await fetch(tgApiUrl('getMe', env), { method: 'GET' });
+    return await res.json();
+  } catch (e) { console.error('tgGetMe error', e); return null; }
+}
+
+async function getBotUsername(env) {
+  try {
+    if (env?.BOT_USERNAME) return env.BOT_USERNAME;
+    const s = await getSettings(env);
+    if (s?.bot_username) return s.bot_username;
+    const me = await tgGetMe(env);
+    const u = me?.result?.username;
+    if (u) {
+      s.bot_username = u;
+      await setSettings(env, s);
+      return u;
+    }
+    return '';
+  } catch (e) { console.error('getBotUsername error', e); return ''; }
+}
+
+// Referral helpers (auto credit once)
+async function autoCreditReferralIfNeeded(env, referrerId, referredId) {
   try {
     if (!referrerId || !referredId || String(referrerId) === String(referredId)) return false;
     const doneKey = CONFIG.REF_DONE_PREFIX + String(referredId);
     const done = await kvGet(env, doneKey);
-    if (done) return false; // already done
-    const pendKey = CONFIG.REF_PENDING_PREFIX + String(referredId);
-    const exists = await kvGet(env, pendKey);
-    if (exists) return true; // already pending
-    const rec = { referrer_id: String(referrerId), referred_id: String(referredId), ts: nowTs() };
-    await kvSet(env, pendKey, rec);
+    if (done) return false; // already credited once
+    const amount = 1; // grant 1 coin to referred user
+    const credited = await creditBalance(env, String(referredId), amount);
+    if (!credited) return false;
+    // optionally bump referrer counter
+    const ru = await getUser(env, String(referrerId));
+    if (ru) { ru.ref_count = Number(ru.ref_count || 0) + 1; await setUser(env, String(referrerId), ru); }
+    await kvSet(env, doneKey, { ts: nowTs(), amount, referrer_id: String(referrerId) });
     return true;
-  } catch (e) { console.error('createPendingReferral error', e); return false; }
-}
-
-async function listPendingReferrals(env, limit = 20) {
-  try {
-    const list = await env.BOT_KV.list({ prefix: CONFIG.REF_PENDING_PREFIX, limit: 1000 });
-    const items = [];
-    for (const k of list.keys) { const v = await kvGet(env, k.name); if (v) items.push(v); }
-    items.sort((a,b)=> (a.ts||0) - (b.ts||0));
-    return items.slice(0, limit);
-  } catch (e) { console.error('listPendingReferrals error', e); return []; }
-}
-
-async function approveReferral(env, referredId) {
-  try {
-    const pendKey = CONFIG.REF_PENDING_PREFIX + String(referredId);
-    const rec = await kvGet(env, pendKey);
-    if (!rec) return { ok:false, reason:'not_found' };
-    const amount = 1; // 1 coin upon approval
-    const credited = await creditBalance(env, String(rec.referred_id), amount);
-    if (!credited) return { ok:false, reason:'credit_failed' };
-    await kvDel(env, pendKey);
-    await kvSet(env, CONFIG.REF_DONE_PREFIX + String(referredId), { ts: nowTs(), amount });
-    return { ok:true, rec, amount };
-  } catch (e) { console.error('approveReferral error', e); return { ok:false, reason:'exception' }; }
+  } catch (e) { console.error('autoCreditReferralIfNeeded error', e); return false; }
 }
 
 // Ticket storage
@@ -387,7 +388,7 @@ function adminMenuKb(settings) {
     ],
     [ { text: '⬆️ بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
     [ { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' }, { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' } ],
-    [ { text: '✅ تایید معرفی‌ها', callback_data: 'adm_refs' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
+    [ { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     [ { text: '➕ افزودن سکه', callback_data: 'adm_add' }, { text: '➖ کسر سکه', callback_data: 'adm_sub' } ],
     [ { text: '🧾 قیمت هر سکه', callback_data: 'adm_cost' } ],
   ]);
@@ -769,10 +770,16 @@ async function onCallback(cb, env) {
     if (data === 'referrals') {
       const u = await getUser(env, uid);
       const count = Number(u?.ref_count || 0);
-      const botUser = env?.BOT_USERNAME || '';
+      const botUser = await getBotUsername(env);
       const suffix = uid;
-      const link = botUser ? `https://t.me/${botUser}?start=${suffix}` : 'لینک در دسترس نیست (BOT_USERNAME را در env تنظیم کنید)';
-      await tgSendMessage(env, chat_id, `👥 معرفی دوستان\nتعداد افراد معرفی‌شده: <b>${fmtNum(count)}</b>\nلینک دعوت: ${link}`, {});
+      const parts = [
+        '👥 معرفی دوستان',
+        `تعداد افراد معرفی‌شده: <b>${fmtNum(count)}</b>`,
+      ];
+      if (botUser) {
+        parts.push(`لینک دعوت: https://t.me/${botUser}?start=${suffix}`);
+      }
+      await tgSendMessage(env, chat_id, parts.join('\n'));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -936,11 +943,9 @@ async function onCallback(cb, env) {
 
 async function sendWelcome(chat_id, uid, env, msg) {
   try {
-    // Referral handling (pending approval)
+    // Referral handling (auto credit after checks)
     const ref = extractReferrerFromStartParam(msg);
-    if (ref && ref !== uid) {
-      await createPendingReferral(env, String(ref), String(uid));
-    }
+    const hasRef = ref && ref !== uid;
     // Force join if needed
     const joined = await ensureJoinedChannels(env, uid, chat_id);
     if (!joined) return;
@@ -949,6 +954,12 @@ async function sendWelcome(chat_id, uid, env, msg) {
     if (settings.update_mode === true && !isAdminUser(env, uid)) {
       await tgSendMessage(env, chat_id, 'ربات در حال بروزرسانی است. لطفاً بعداً مراجعه کنید.');
       return;
+    }
+    if (hasRef) {
+      const ok = await autoCreditReferralIfNeeded(env, String(ref), String(uid));
+      if (ok) {
+        try { await tgSendMessage(env, uid, `🎉 ثبت نام شما با لینک دعوت انجام شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
+      }
     }
     await tgSendMessage(env, chat_id, `به ${CONFIG.BOT_NAME} خوش آمدید!`, mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
