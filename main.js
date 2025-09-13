@@ -50,8 +50,8 @@ const CONFIG = {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.2';
-  } catch { return '1.2'; }
+    return s?.bot_version || '1.3';
+  } catch { return '1.3'; }
 }
 
 async function mainMenuHeader(env) {
@@ -69,7 +69,6 @@ async function tgGetMe(env) {
 
 async function getBotUsername(env) {
   try {
-    if (env?.BOT_USERNAME) return env.BOT_USERNAME;
     const s = await getSettings(env);
     if (s?.bot_username) return s.bot_username;
     const me = await tgGetMe(env);
@@ -312,17 +311,15 @@ function normalizeChannelToken(token) {
 async function buildJoinKb(env) {
   try {
     const s = await getSettings(env);
-    const src = (s?.join_channels && Array.isArray(s.join_channels) ? s.join_channels : [])
+    const channels = (s?.join_channels && Array.isArray(s.join_channels) ? s.join_channels : [])
       .filter(Boolean);
-    const fallback = String(env?.JOIN_CHANNELS || '')
-      .split(',').map(x => x.trim()).filter(Boolean);
-    const channels = src.length ? src : fallback;
     const rows = [];
     for (const chRaw of channels) {
       const ch = chRaw.trim();
       if (!ch) continue;
       const url = ch.startsWith('http') ? ch : `https://t.me/${ch.replace(/^@/, '')}`;
-      rows.push([{ text: `عضویت در ${ch}`, url }]);
+      // به درخواست شما آیدی کانال نمایش داده نشود
+      rows.push([{ text: 'عضویت در کانال', url }]);
     }
     rows.push([{ text: '✅ بررسی عضویت', callback_data: 'join_check' }]);
     return { reply_markup: { inline_keyboard: rows } };
@@ -334,14 +331,39 @@ async function buildJoinKb(env) {
 async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
   try {
     const s = await getSettings(env);
-    const src = (s?.join_channels && Array.isArray(s.join_channels) ? s.join_channels.join(',') : '') || String(env?.JOIN_CHANNELS || '');
+    const src = (s?.join_channels && Array.isArray(s.join_channels) ? s.join_channels.join(',') : '');
     const channels = String(src || '')
       .split(',').map(s => s.trim()).filter(Boolean);
     if (!channels.length) return true; // No mandatory channels configured
     // Try to check membership; if API fails, show prompt
     for (const ch of channels) {
       try {
-        const chat = ch.startsWith('@') || /^-100/.test(ch) ? ch : `@${ch}`;
+        // پشتیبانی از ورودی‌های مختلف: @username ، -100id ، یا لینک t.me
+        let chat = '';
+        if (ch.startsWith('http')) {
+          // تلاش برای استخراج یوزرنیم از لینک t.me
+          try {
+            const u = new URL(ch);
+            const host = u.hostname.replace(/^www\./, '');
+            const seg = (u.pathname || '').split('/').filter(Boolean)[0] || '';
+            // اگر لینک از نوع t.me/<username> بود
+            if ((host === 't.me' || host === 'telegram.me') && seg && seg.toLowerCase() !== 'joinchat') {
+              chat = '@' + seg;
+            } else {
+              // لینک دعوت خصوصی یا ناشناس → امکان چک membership نیست؛ از این مورد صرف‌نظر می‌کنیم
+              chat = '';
+            }
+          } catch {
+            chat = '';
+          }
+        } else if (ch.startsWith('@') || /^-100/.test(ch)) {
+          chat = ch;
+        } else {
+          chat = `@${ch}`;
+        }
+
+        // اگر قابل بررسی نبود، از این کانال عبور می‌کنیم
+        if (!chat) continue;
         const res = await tgGetChatMember(env, chat, uid);
         const status = res?.result?.status;
         if (!status || ['left', 'kicked'].includes(status)) {
@@ -349,8 +371,10 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
           return false;
         }
       } catch (e) {
-        // On error, prompt to join
-        if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
+        // در خطاهای موقت تلگرام، کاربر را مزاحم نکنیم؛ فقط اگر silent=false باشد یک بار راهنما می‌فرستیم
+        if (!silent) {
+          await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
+        }
         return false;
       }
     }
@@ -443,8 +467,6 @@ async function handleRoot(request, env) {
       adminIdSet: Boolean((env?.ADMIN_ID || '').trim()),
       adminIdsSet: Boolean((env?.ADMIN_IDS || '').trim()),
       kvBound: Boolean(env?.BOT_KV),
-      botUsernameSet: Boolean((env?.BOT_USERNAME || '').trim()),
-      joinChannelsSet: Boolean((env?.JOIN_CHANNELS || '').trim()),
     };
     // Small KV snapshot: settings + stats
     const kvSnapshot = { settings, stats };
@@ -773,6 +795,9 @@ async function onCallback(cb, env) {
       if (ok) {
         const hdr = await mainMenuHeader(env);
         await tgEditMessage(env, chat_id, mid, `✅ عضویت شما تایید شد.\n${hdr}`, mainMenuKb(env, uid));
+      } else {
+        // در صورت عدم تایید، مجدداً راهنمای عضویت را نمایش بده
+        await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
       }
       await tgAnswerCallbackQuery(env, cb.id);
       return;
@@ -1114,6 +1139,13 @@ async function getBaseUrlFromBot(env) {
   // روی Pages، URL را هنگام فراخوانی نمی‌دانیم؛ در لینک‌های تلگرام از دامنه پابلیک استفاده کنید
   // می‌توانید مقدار ثابت دامنه را در تنظیمات ذخیره کنید یا از ENV.PAGE_URL اگر داشتید.
   // برای سادگی فرض: از webhook URL مشتق نمی‌کنیم و از window.origin ممکن نیست. لذا لینک نسبی می‌سازیم.
+  try {
+    const s = await getSettings(env);
+    const base = (s && s.base_url) ? String(s.base_url).trim() : '';
+    if (base) return base.replace(/\/$/, '');
+    const envBase = (env && env.PAGE_URL) ? String(env.PAGE_URL).trim() : '';
+    if (envBase) return envBase.replace(/\/$/, '');
+  } catch {}
   return '';
 }
 
@@ -1190,8 +1222,6 @@ function renderStatusPage(settings, stats, envSummary = {}, kvSnapshot = {}) {
         <div>ADMIN_ID set: <b>${envSummary.adminIdSet ? 'Yes' : 'No'}</b></div>
         <div>ADMIN_IDS set: <b>${envSummary.adminIdsSet ? 'Yes' : 'No'}</b></div>
         <div>BOT_KV bound: <b>${envSummary.kvBound ? 'Yes' : 'No'}</b></div>
-        <div>BOT_USERNAME set: <b>${envSummary.botUsernameSet ? 'Yes' : 'No'}</b></div>
-        <div>JOIN_CHANNELS set: <b>${envSummary.joinChannelsSet ? 'Yes' : 'No'}</b></div>
       </div>
       <div class="stat">
         <div style="margin-bottom:6px; font-weight:600;">KV (settings)</div>
