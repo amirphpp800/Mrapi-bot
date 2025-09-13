@@ -398,11 +398,16 @@ function adminMenuKb(settings) {
   const enabled = settings?.service_enabled !== false;
   const updating = settings?.update_mode === true;
   return kb([
-    [ { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' }, { text: '📡 تنظیم جویین اجباری', callback_data: 'adm_join' } ],
-    [ { text: '⬆️ بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
-    [ { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' }, { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' } ],
-    [ { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
-    [ { text: '➕ افزودن سکه', callback_data: 'adm_add' }, { text: '➖ کسر سکه', callback_data: 'adm_sub' } ],
+    // Row 1: Update mode only
+    [ { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' } ],
+    // Row 2: Upload | Manage Files
+    [ { text: '📤 بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
+    // Row 3: Tickets | Gift Codes
+    [ { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' }, { text: '🎁 کدهای هدیه', callback_data: 'adm_gifts' } ],
+    // Row 4: Join Mandatory | Bot Stats
+    [ { text: '📢 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
+    // Row 5: Subtract | Add Coins
+    [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
   ]);
 }
 
