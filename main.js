@@ -1,14 +1,6 @@
 /*
   main.js — Cloudflare Pages Functions Worker for a Telegram bot
 
-  EN: Single-file implementation designed for Cloudflare Pages. Uses Workers KV
-      (binding: BOT_KV). The bot exposes a Telegram webhook and a secure file
-      download endpoint. Root web address shows a status page only.
-
-  FA: ساختار تک‌فایل برای دیپلوی آسان روی Cloudflare Pages. از Workers KV با بایندینگ
-      BOT_KV استفاده می‌کند. وب‌هوک تلگرام و لینک دانلود خصوصی دارد. صفحه‌ی اصلی فقط
-      وضعیت سرویس را نمایش می‌دهد.
-
   Sections:
   1) Config & Runtime (env & constants)
   2) KV Helpers (get/set/delete)
@@ -19,12 +11,6 @@
   7) Features & Flows (main menu, profile, tickets, transfer, files, admin)
   8) Storage Helpers (users, files, settings, stats)
   9) Public Status Page (HTML)
-
-  Notes:
-  - All in-bot strings are Persian; in-app currency is «سکه».
-  - Defensive try/catch to avoid Cloudflare error 1101.
-  - KV operations are simple and fast.
-  - Private link: /f/<token>?uid=<telegram_id>&ref=<referrer_id>
 */
 
 // =========================================================
@@ -50,8 +36,8 @@ const CONFIG = {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.3';
-  } catch { return '1.3'; }
+    return s?.bot_version || '1.4';
+  } catch { return '1.4'; }
 }
 
 async function mainMenuHeader(env) {
@@ -468,9 +454,7 @@ async function handleRoot(request, env) {
       adminIdsSet: Boolean((env?.ADMIN_IDS || '').trim()),
       kvBound: Boolean(env?.BOT_KV),
     };
-    // Small KV snapshot: settings + stats
-    const kvSnapshot = { settings, stats };
-    return new Response(renderStatusPage(settings, stats, envSummary, kvSnapshot), {
+    return new Response(renderStatusPage(settings, stats, envSummary), {
       headers: { 'content-type': 'text/html; charset=utf-8' },
     });
   } catch (e) {
@@ -793,6 +777,17 @@ async function onCallback(cb, env) {
     if (data === 'join_check') {
       const ok = await ensureJoinedChannels(env, uid, chat_id, true);
       if (ok) {
+        // پس از تایید عضویت، اگر معرف ذخیره شده است، یکبار سکه به معرف بده
+        try {
+          const u = await getUser(env, uid);
+          const ref = u?.referrer_id;
+          if (ref && String(ref) !== String(uid)) {
+            const credited = await autoCreditReferralIfNeeded(env, String(ref), String(uid));
+            if (credited) {
+              try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید تایید شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
+            }
+          }
+        } catch {}
         const hdr = await mainMenuHeader(env);
         await tgEditMessage(env, chat_id, mid, `✅ عضویت شما تایید شد.\n${hdr}`, mainMenuKb(env, uid));
       } else {
@@ -975,6 +970,16 @@ async function sendWelcome(chat_id, uid, env, msg) {
     // Referral handling (auto credit after checks)
     const ref = extractReferrerFromStartParam(msg);
     const hasRef = ref && ref !== uid;
+    // ذخیره معرف در پروفایل کاربر تا پس از تایید عضویت هم قابل اعتباردهی باشد
+    if (hasRef) {
+      try {
+        const u = await getUser(env, uid);
+        if (u && !u.referrer_id) {
+          u.referrer_id = String(ref);
+          await setUser(env, uid, u);
+        }
+      } catch {}
+    }
     // Force join if needed
     const joined = await ensureJoinedChannels(env, uid, chat_id);
     if (!joined) return;
@@ -1179,13 +1184,12 @@ async function routerFetch(request, env, ctx) {
     console.error('routerFetch error', e);
     return new Response('Internal Error', { status: 500 });
   }
-}
-
-// =========================================================
 // 9) Public Status Page (Glassmorphism)
 // =========================================================
-function renderStatusPage(settings, stats, envSummary = {}, kvSnapshot = {}) {
+function renderStatusPage(settings, stats, envSummary = {}) {
   const enabled = settings?.service_enabled !== false;
+  const users = Number((stats || {}).users || 0);
+  const files = Number((stats || {}).files || 0);
   return `<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
@@ -1194,42 +1198,52 @@ function renderStatusPage(settings, stats, envSummary = {}, kvSnapshot = {}) {
 <title>وضعیت ربات</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;600&display=swap');
-  * { box-sizing: border-box; }
-  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background: radial-gradient(1200px 600px at 30% 20%, rgba(255,255,255,0.12), transparent), linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d); font-family: 'Vazirmatn', sans-serif; }
-  .card { width: min(680px, 92vw); padding: 24px; backdrop-filter: blur(12px); background: rgba(255,255,255,0.10); border-radius: 16px; border: 1px solid rgba(255,255,255,0.25); color:#fff; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
-  h1 { margin:0 0 8px; font-size:22px; }
-  .pill { display:inline-block; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.15); font-size:12px; }
-  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap:12px; margin-top:12px; }
-  .stat { padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.10); }
-  code { background: rgba(0,0,0,0.35); padding:2px 6px; border-radius:8px; }
-  a { color:#fff; }
+  :root { --bg: #0f172a; --card: rgba(255,255,255,0.08); --text: #e5e7eb; --sub:#94a3b8; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; font-family:'Vazirmatn',sans-serif; background:linear-gradient(180deg,#0b1020,#141a2f); color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+  .container{ width:100%; max-width:720px; }
+  header{ text-align:center; margin-bottom:24px; }
+  h1{ font-weight:600; margin:0 0 6px; }
+  p{ margin:0; color:var(--sub); }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; }
+  .card{ background:var(--card); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:16px; backdrop-filter: blur(10px); box-shadow:0 10px 30px rgba(0,0,0,0.25); }
+  .stat{ font-size:14px; }
+  .pill{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; }
+  .ok{ background:rgba(52,211,153,0.15); color:#34d399; }
+  .bad{ background:rgba(248,113,113,0.15); color:#f87171; }
+  .warn{ background:rgba(251,191,36,0.15); color:#fbbf24; }
 </style>
 </head>
 <body>
-  <main class="card">
-    <h1>وضعیت ربات</h1>
-    <div>سرویس: <span class="pill">${enabled ? '🟢 فعال' : '🔴 غیرفعال'}</span></div>
+  <main class="container">
+    <header>
+      <h1>وضعیت ربات</h1>
+      <p>نمایش خلاصه وضعیت سرویس</p>
+    </header>
     <div class="grid">
-      <div class="stat">به‌روزرسانی‌ها: <b>${(stats.updates||0)}</b></div>
-      <div class="stat">کاربران: <b>${(stats.users||0)}</b></div>
-      <div class="stat">فایل‌ها: <b>${(stats.files||0)}</b></div>
-    </div>
-    <p style="opacity:.85; margin-top:12px;">وبهوک: <code>/webhook</code> — لینک فایل خصوصی: <code>/f/&lt;token&gt;?uid=&lt;telegram_id&gt;&amp;ref=&lt;referrer_id&gt;</code></p>
-    <div class="grid" style="margin-top:12px;">
-      <div class="stat">
-        <div style="margin-bottom:6px; font-weight:600;">ENV</div>
-        <div>BOT_TOKEN set: <b>${envSummary.botTokenSet ? 'Yes' : 'No'}</b></div>
-        <div>ADMIN_ID set: <b>${envSummary.adminIdSet ? 'Yes' : 'No'}</b></div>
-        <div>ADMIN_IDS set: <b>${envSummary.adminIdsSet ? 'Yes' : 'No'}</b></div>
-        <div>BOT_KV bound: <b>${envSummary.kvBound ? 'Yes' : 'No'}</b></div>
+      <div class="card stat">
+        <div style="margin-bottom:6px; font-weight:600;">توکن ربات</div>
+        <span class="pill ${envSummary.botTokenSet ? 'ok' : 'bad'}">${envSummary.botTokenSet ? 'تنظیم شده' : 'تنظیم نشده'}</span>
       </div>
-      <div class="stat">
-        <div style="margin-bottom:6px; font-weight:600;">KV (settings)</div>
-        <pre style="white-space:pre-wrap; direction:ltr; text-align:left; font-size:12px;">${htmlEscape(JSON.stringify(kvSnapshot.settings || {}, null, 2))}</pre>
+      <div class="card stat">
+        <div style="margin-bottom:6px; font-weight:600;">ادمین</div>
+        <span class="pill ${envSummary.adminIdSet || envSummary.adminIdsSet ? 'ok' : 'warn'}">${envSummary.adminIdSet || envSummary.adminIdsSet ? 'تعریف شده' : 'تعریف نشده'}</span>
       </div>
-      <div class="stat">
-        <div style="margin-bottom:6px; font-weight:600;">KV (stats)</div>
-        <pre style="white-space:pre-wrap; direction:ltr; text-align:left; font-size:12px;">${htmlEscape(JSON.stringify(kvSnapshot.stats || {}, null, 2))}</pre>
+      <div class="card stat">
+        <div style="margin-bottom:6px; font-weight:600;">اتصال KV</div>
+        <span class="pill ${envSummary.kvBound ? 'ok' : 'bad'}">${envSummary.kvBound ? 'متصل' : 'نامتصل'}</span>
+      </div>
+      <div class="card stat">
+        <div style="margin-bottom:6px; font-weight:600;">وضعیت سرویس</div>
+        <span class="pill ${enabled ? 'ok' : 'warn'}">${enabled ? 'فعال' : 'غیرفعال'}</span>
+      </div>
+      <div class="card stat">
+        <div style="margin-bottom:6px; font-weight:600;">تعداد کاربران</div>
+        <div>${users.toLocaleString('fa-IR')}</div>
+      </div>
+      <div class="card stat">
+        <div style="margin-bottom:6px; font-weight:600;">تعداد فایل‌ها</div>
+        <div>${files.toLocaleString('fa-IR')}</div>
       </div>
     </div>
   </main>
