@@ -575,6 +575,20 @@ function kindIcon(kind) {
   return '📄';
 }
 
+// لیست شناخته‌شده‌ای از callback_data ها برای مدیریت سریع دکمه‌های غیرفعال
+function getKnownCallbacks() {
+  return [
+    // منوی اصلی کاربر
+    'referrals', 'account', 'giftcode', 'redeem_token', 'buy_coins',
+    // حساب و تیکت کاربر
+    'ticket_new', 'back_main',
+    // خرید
+    'buy_plan:p1', 'buy_plan:p2', 'buy_plan:p3', // شناسه‌های نمونه پلن‌ها
+    // ادمین — نمایش فقط برای مدیریت (غیرفعال‌سازی برای کاربر معمولی کاربرد دارد)
+    'admin', 'adm_service', 'adm_stats', 'adm_join', 'adm_add', 'adm_sub', 'adm_gifts', 'adm_tickets', 'fm', 'myfiles',
+  ];
+}
+
 // تشخیص ادمین از روی متغیرهای محیطی
 function isAdminUser(env, uid) {
   try {
@@ -768,6 +782,15 @@ async function onMessage(msg, env) {
     const from = msg.from || {};
     const uid = String(from.id);
     await ensureUser(env, uid, from);
+
+    // If update mode is on, block non-admin users globally
+    try {
+      const s = await getSettings(env);
+      if (s?.update_mode === true && !isAdminUser(env, uid)) {
+        await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.');
+        return;
+      }
+    } catch {}
 
     // Mandatory join check
     const joined = await ensureJoinedChannels(env, uid, chat_id);
@@ -1061,6 +1084,21 @@ async function onMessage(msg, env) {
           await clearUserState(env, uid);
           return;
         }
+        // Admin: پاسخ به تیکت
+        if (state?.step === 'adm_ticket_reply' && state?.ticket_id && state?.target_uid) {
+          const replyText = (text || '').trim();
+          const t = await getTicket(env, state.ticket_id);
+          if (t) {
+            t.replies = Array.isArray(t.replies) ? t.replies : [];
+            t.replies.push({ from_admin: true, text: replyText, ts: nowTs() });
+            t.status = 'answered';
+            await saveTicket(env, t);
+            try { await tgSendMessage(env, state.target_uid, `📩 پاسخ پشتیبانی:\n${replyText}`); } catch {}
+          }
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, 'پاسخ ارسال شد.');
+          return;
+        }
         if (state?.step === 'adm_broadcast_wait') {
           const msgText = (text || '').trim();
           if (!msgText) { await tgSendMessage(env, chat_id, '❌ متن نامعتبر است.'); return; }
@@ -1156,6 +1194,16 @@ async function onCallback(cb, env) {
     const uid = String(from.id);
     const chat_id = cb.message?.chat?.id;
     const mid = cb.message?.message_id;
+
+    // Update mode: block non-admin users from using buttons
+    try {
+      const s = await getSettings(env);
+      if (s?.update_mode === true && !isAdminUser(env, uid)) {
+        await tgAnswerCallbackQuery(env, cb.id, '🛠️ در حال بروزرسانی');
+        await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.');
+        return;
+      }
+    } catch {}
 
     // اگر برخی دکمه‌ها به صورت مجزا غیرفعال شده‌اند و کاربر ادمین نیست
     try {
@@ -1487,41 +1535,55 @@ async function onCallback(cb, env) {
       }
       if (data === 'adm_buttons') {
         const s = await getSettings(env);
-        const list = Array.isArray(s.disabled_buttons) ? s.disabled_buttons : [];
-        const txt = ` مدیریت دکمه‌های غیرفعال\nدکمه‌های فعلی: ${list.length ? list.map(x=>`<code>${htmlEscape(x)}</code>`).join(', ') : '—'}\n\nافزودن/حذف: دکمه زیر را بزنید و سپس مقدار <code>callback_data</code> را ارسال کنید.\nپاکسازی برای خالی کردن لیست.`;
-        const kbSrv = kb([[
-          { text: '➕ افزودن/حذف دکمه', callback_data: 'adm_buttons_add' }
-        ],[
-          { text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }
-        ],[
-          { text: ' بازگشت', callback_data: 'adm_service' }
-        ]]);
-        await tgEditMessage(env, chat_id, mid, txt, kbSrv);
+        const disabled = Array.isArray(s.disabled_buttons) ? s.disabled_buttons : [];
+        const known = getKnownCallbacks();
+        const rows = [];
+        for (const k of known) {
+          const isDis = disabled.includes(k);
+          const label = (isDis ? '🚫 ' : '🟢 ') + k;
+          rows.push([{ text: label, callback_data: 'adm_btn_toggle:'+k }]);
+        }
+        rows.push([{ text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_service' }]);
+        const txt = 'مدیریت دکمه‌های غیرفعال\nیکی را برای تغییر وضعیت انتخاب کنید:';
+        await tgEditMessage(env, chat_id, mid, txt, kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_btn_toggle:')) {
+        const key = data.substring('adm_btn_toggle:'.length);
+        const s = await getSettings(env);
+        s.disabled_buttons = Array.isArray(s.disabled_buttons) ? s.disabled_buttons : [];
+        const idx = s.disabled_buttons.indexOf(key);
+        if (idx === -1) s.disabled_buttons.push(key); else s.disabled_buttons.splice(idx, 1);
+        await setSettings(env, s);
+        // Refresh view
+        const disabled = s.disabled_buttons;
+        const known = getKnownCallbacks();
+        const rows = [];
+        for (const k of known) {
+          const isDis = disabled.includes(k);
+          const label = (isDis ? '🚫 ' : '🟢 ') + k;
+          rows.push([{ text: label, callback_data: 'adm_btn_toggle:'+k }]);
+        }
+        rows.push([{ text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_service' }]);
+        await tgEditMessage(env, chat_id, mid, 'مدیریت دکمه‌های غیرفعال\nیکی را برای تغییر وضعیت انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
         return;
       }
       if (data === 'adm_buttons_clear') {
         const s = await getSettings(env);
         s.disabled_buttons = [];
         await setSettings(env, s);
+        // Refresh inline list
+        const known = getKnownCallbacks();
+        const rows = [];
+        for (const k of known) rows.push([{ text: '🟢 ' + k, callback_data: 'adm_btn_toggle:'+k }]);
+        rows.push([{ text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_service' }]);
+        await tgEditMessage(env, chat_id, mid, 'مدیریت دکمه‌های غیرفعال\nیکی را برای تغییر وضعیت انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id, 'خالی شد');
-        // Refresh view
-        const list = [];
-        const txt = ` مدیریت دکمه‌های غیرفعال\nدکمه‌های فعلی: —`;
-        const kbSrv = kb([[
-          { text: '➕ افزودن/حذف دکمه', callback_data: 'adm_buttons_add' }
-        ],[
-          { text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }
-        ],[
-          { text: ' بازگشت', callback_data: 'adm_service' }
-        ]]);
-        await tgEditMessage(env, chat_id, mid, txt, kbSrv);
-        return;
-      }
-      if (data === 'adm_buttons_add') {
-        await setUserState(env, uid, { step: 'adm_buttons_wait' });
-        await tgEditMessage(env, chat_id, mid, 'لطفاً مقدار دقیق callback_data دکمه‌ای که می‌خواهید غیرفعال/فعال شود را ارسال کنید.', {});
-        await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data === 'adm_add') {
@@ -1597,6 +1659,137 @@ async function onCallback(cb, env) {
         const txt = ` آمار ربات\nکاربران: ${users}\nفایل‌ها: ${files}\nبه‌روزرسانی‌ها: ${updates}`;
         await tgAnswerCallbackQuery(env, cb.id);
         await tgEditMessage(env, chat_id, mid, txt, adminMenuKb(await getSettings(env)));
+        return;
+      }
+      if (data === 'adm_tickets') {
+        const items = await listTickets(env, 10);
+        const rows = items.map(t => ([{ text: `${t.closed?'🔒':'📨'} ${t.type||'general'} — ${t.id}`, callback_data: 'ticket_view:'+t.id }]));
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, `🎟 تیکت‌های اخیر (${items.length})`, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('ticket_view:')) {
+        const id = data.split(':')[1];
+        const t = await getTicket(env, id);
+        if (!t) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        const txt = [
+          `🎟 تیکت #${t.id}`,
+          `کاربر: <code>${t.user_id}</code>`,
+          `نوع: ${t.type||'general'}`,
+          `وضعیت: ${t.closed ? 'بسته' : (t.status||'open')}`,
+          '',
+          `متن: ${htmlEscape(t.content||'-')}`,
+        ].join('\n');
+        const rows = [
+          [{ text: '✍️ پاسخ', callback_data: 'ticket_reply:'+t.id }, { text: t.closed ? '🔓 بازگشایی' : '🔒 بستن', callback_data: (t.closed?'ticket_reopen:':'ticket_close:')+t.id }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_tickets' }]
+        ];
+        await tgEditMessage(env, chat_id, mid, txt, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('ticket_reply:')) {
+        const id = data.split(':')[1];
+        const t = await getTicket(env, id);
+        if (!t) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        await setUserState(env, uid, { step: 'adm_ticket_reply', ticket_id: id, target_uid: String(t.user_id) });
+        await tgSendMessage(env, chat_id, 'لطفاً پاسخ خود را ارسال کنید.');
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('ticket_close:')) {
+        const id = data.split(':')[1];
+        const t = await getTicket(env, id);
+        if (!t) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        t.closed = true; t.status = 'closed';
+        await saveTicket(env, t);
+        await tgAnswerCallbackQuery(env, cb.id, 'بسته شد');
+        // Refresh view
+        const txt = [
+          `🎟 تیکت #${t.id}`,
+          `کاربر: <code>${t.user_id}</code>`,
+          `نوع: ${t.type||'general'}`,
+          `وضعیت: ${t.closed ? 'بسته' : (t.status||'open')}`,
+          '',
+          `متن: ${htmlEscape(t.content||'-')}`,
+        ].join('\n');
+        const rows = [
+          [{ text: '✍️ پاسخ', callback_data: 'ticket_reply:'+t.id }, { text: t.closed ? '🔓 بازگشایی' : '🔒 بستن', callback_data: (t.closed?'ticket_reopen:':'ticket_close:')+t.id }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_tickets' }]
+        ];
+        await tgEditMessage(env, chat_id, mid, txt, kb(rows));
+        return;
+      }
+      if (data.startsWith('ticket_reopen:')) {
+        const id = data.split(':')[1];
+        const t = await getTicket(env, id);
+        if (!t) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        t.closed = false; t.status = 'open';
+        await saveTicket(env, t);
+        await tgAnswerCallbackQuery(env, cb.id, 'باز شد');
+        const txt = [
+          `🎟 تیکت #${t.id}`,
+          `کاربر: <code>${t.user_id}</code>`,
+          `نوع: ${t.type||'general'}`,
+          `وضعیت: ${t.closed ? 'بسته' : (t.status||'open')}`,
+          '',
+          `متن: ${htmlEscape(t.content||'-')}`,
+        ].join('\n');
+        const rows = [
+          [{ text: '✍️ پاسخ', callback_data: 'ticket_reply:'+t.id }, { text: t.closed ? '🔓 بازگشایی' : '🔒 بستن', callback_data: (t.closed?'ticket_reopen:':'ticket_close:')+t.id }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_tickets' }]
+        ];
+        await tgEditMessage(env, chat_id, mid, txt, kb(rows));
+        return;
+      }
+      if (data === 'adm_gifts') {
+        const items = await listGiftCodes(env, 10);
+        const rows = items.map(g => ([{ text: `${g.used_by?'✅ مصرف شده':'🎁'} ${g.code} — ${fmtNum(g.amount)}`, callback_data: 'gift_view:'+g.code }]));
+        rows.push([{ text: '➕ ایجاد کد جدید', callback_data: 'gift_new' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, `🎁 کدهای هدیه اخیر (${items.length})`, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'gift_new') {
+        await setUserState(env, uid, { step: 'adm_gift_create_amount' });
+        await tgEditMessage(env, chat_id, mid, 'مبلغ کد هدیه را ارسال کنید (فقط رقم). /update برای لغو', {});
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('gift_view:')) {
+        const code = data.split(':')[1];
+        const g = await kvGet(env, CONFIG.GIFT_PREFIX + code);
+        if (!g) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        const txt = [
+          `کد: <code>${g.code}</code>`,
+          `مبلغ: ${fmtNum(g.amount)} ${CONFIG.DEFAULT_CURRENCY}`,
+          `وضعیت: ${g.used_by ? 'مصرف شده' : 'استفاده نشده'}`,
+          g.used_by ? `استفاده توسط: <code>${g.used_by}</code>` : ''
+        ].filter(Boolean).join('\n');
+        const rows = [
+          [{ text: '🗑 حذف', callback_data: 'gift_del:'+g.code }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_gifts' }]
+        ];
+        await tgEditMessage(env, chat_id, mid, txt, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('gift_del:')) {
+        const code = data.split(':')[1];
+        const g = await kvGet(env, CONFIG.GIFT_PREFIX + code);
+        if (!g) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        const kbDel = kb([[{ text: '✅ تایید حذف', callback_data: 'gift_del_confirm:'+code }],[{ text: '🔙 انصراف', callback_data: 'gift_view:'+code }]]);
+        await tgEditMessage(env, chat_id, mid, `❗️ حذف کد هدیه <code>${code}</code>?`, kbDel);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('gift_del_confirm:')) {
+        const code = data.split(':')[1];
+        await kvDel(env, CONFIG.GIFT_PREFIX + code);
+        await tgEditMessage(env, chat_id, mid, `🗑 کد هدیه <code>${code}</code> حذف شد.`, kb([[{ text: '🔙 بازگشت', callback_data: 'adm_gifts' }]]));
+        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
         return;
       }
       if (data === 'adm_join') {
