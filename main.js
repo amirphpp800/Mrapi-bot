@@ -1025,7 +1025,15 @@ async function sendMainMenu(env, chatId, uid, opts = {}) {
     rows.push([{ text: '🛠 پنل مدیریت', callback_data: 'ADMIN:PANEL' }]);
   }
   const replyMarkup = { inline_keyboard: rows };
-  await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyMarkup });
+  try {
+    const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyMarkup });
+    if (!res || !res.ok) throw new Error(res && (res.description || res.error) || 'send_failed');
+  } catch (e) {
+    // Fallback minimal inline keyboard and surface error for debugging
+    const minimal = { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] };
+    await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: minimal });
+    try { await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ خطا در نمایش دکمه‌ها: ${String(e && e.message || e)}` }); } catch (_) {}
+  }
 }
 
 /* ==================== 9) Telegram webhook handling ==================== */
