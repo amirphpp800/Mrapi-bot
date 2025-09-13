@@ -27,6 +27,8 @@
   - Private link: /f/<token>?uid=<telegram_id>&ref=<referrer_id>
 */
 
+// Bot Version: 1.0
+
 // =========================================================
 // 1) Config & Runtime
 // =========================================================
@@ -46,6 +48,11 @@ const CONFIG = {
 };
 
 // صفحات فانکشنز env: { BOT_KV }
+
+function mainMenuText() {
+  // Show version under the main menu caption
+  return `منو اصلی:\nنسخه ربات: 1.0`;
+}
 
 // Get bot info (for auto-detecting username if BOT_USERNAME is not set)
 async function tgGetMe(env) {
@@ -303,7 +310,9 @@ function joinMenuKb(env) {
 
 async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
   try {
-    const channels = String(env?.JOIN_CHANNELS || '')
+    const s = await getSettings(env);
+    const src = (s?.join_channels && Array.isArray(s.join_channels) ? s.join_channels.join(',') : '') || String(env?.JOIN_CHANNELS || '');
+    const channels = String(src || '')
       .split(',').map(s => s.trim()).filter(Boolean);
     if (!channels.length) return true; // No mandatory channels configured
     // Try to check membership; if API fails, show prompt
@@ -382,10 +391,7 @@ function adminMenuKb(settings) {
   const enabled = settings?.service_enabled !== false;
   const updating = settings?.update_mode === true;
   return kb([
-    [
-      { text: enabled ? '🟢 سرویس فعال' : '🔴 سرویس غیرفعال', callback_data: 'adm_toggle' },
-      { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' }
-    ],
+    [ { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' }, { text: '📡 تنظیم جویین اجباری', callback_data: 'adm_join' } ],
     [ { text: '⬆️ بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
     [ { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' }, { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' } ],
     [ { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
@@ -540,7 +546,7 @@ async function onMessage(msg, env) {
     }
     if (text.startsWith('/update')) {
       await clearUserState(env, uid);
-      await tgSendMessage(env, chat_id, 'منو اصلی:', mainMenuKb(env, uid));
+      await tgSendMessage(env, chat_id, mainMenuText(), mainMenuKb(env, uid));
       return;
     }
 
@@ -666,6 +672,18 @@ async function onMessage(msg, env) {
       }
       // Admin flows
       if (isAdminUser(env, uid)) {
+        if (state?.step === 'adm_join_wait') {
+          const list = String(text || '')
+            .split(',')
+            .map(s => s.trim())
+            .filter(Boolean);
+          const s = await getSettings(env);
+          s.join_channels = list;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `✅ کانال‌های جویین اجباری بروزرسانی شد: ${list.join(', ') || '—'}`);
+          return;
+        }
         if (state?.step === 'adm_gift_create_amount') {
           const amount = Number(text.replace(/[^0-9]/g, ''));
           if (!amount || amount <= 0) {
@@ -841,7 +859,7 @@ async function onCallback(cb, env) {
 
     if (data === 'update') {
       await clearUserState(env, uid);
-      await tgEditMessage(env, chat_id, mid, 'منو اصلی:', mainMenuKb(env, uid));
+      await tgEditMessage(env, chat_id, mid, mainMenuText(), mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -884,35 +902,13 @@ async function onCallback(cb, env) {
         await tgEditMessage(env, chat_id, mid, txt, adminMenuKb(await getSettings(env)));
         return;
       }
-      if (data === 'adm_refs') {
-        const items = await listPendingReferrals(env, 20);
-        if (items.length === 0) {
-          await tgEditMessage(env, chat_id, mid, 'مورد در انتطار تایید وجود ندارد.', adminMenuKb(await getSettings(env)));
-          await tgAnswerCallbackQuery(env, cb.id);
-          return;
-        }
-        // Build inline approve buttons
-        const rows = items.map(r => [{ text: `تایید ${r.referred_id}`, callback_data: `adm_ref_ok:${r.referred_id}` }]);
-        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
-        await tgEditMessage(env, chat_id, mid, '✅ تایید معرفی‌ها — موارد در انتظار:', { reply_markup: { inline_keyboard: rows } });
+      if (data === 'adm_join') {
+        const s = await getSettings(env);
+        const current = Array.isArray(s.join_channels) ? s.join_channels.join(', ') : '';
+        await setUserState(env, uid, { step: 'adm_join_wait' });
+        const txt = `📡 تنظیم جویین اجباری\nکانال‌های فعلی: ${current || '—'}\n\nلیست کانال‌ها را به صورت کاما (,) جدا کنید ارسال نمایید.\nمثال: @channel1, @channel2 یا لینک کامل`;
+        await tgEditMessage(env, chat_id, mid, txt, {});
         await tgAnswerCallbackQuery(env, cb.id);
-        return;
-      }
-      if (data.startsWith('adm_ref_ok:')) {
-        const referredId = data.split(':')[1];
-        const res = await approveReferral(env, referredId);
-        if (res.ok) {
-          // Notify referred user
-          try { await tgSendMessage(env, res.rec.referred_id, `🎉 معرفی شما تایید شد. 1 ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد.`); } catch {}
-          await tgAnswerCallbackQuery(env, cb.id, 'تایید شد');
-        } else {
-          await tgAnswerCallbackQuery(env, cb.id, 'ناموفق بود یا قبلاً تایید شده');
-        }
-        // Refresh refs list
-        const items = await listPendingReferrals(env, 20);
-        const rows = items.map(r => [{ text: `تایید ${r.referred_id}`, callback_data: `adm_ref_ok:${r.referred_id}` }]);
-        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
-        await tgEditMessage(env, chat_id, mid, '✅ تایید معرفی‌ها — موارد در انتظار:', { reply_markup: { inline_keyboard: rows } });
         return;
       }
       if (data === 'adm_files') {
