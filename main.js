@@ -1407,15 +1407,15 @@ async function onCallback(cb, env) {
           return;
         }
         const before = Number(u.balance || 0);
-        u.balance = before - price;
-        await setUser(env, String(uid), u);
+        const okSub = await subtractBalance(env, String(uid), price);
+        if (!okSub) { await tgAnswerCallbackQuery(env, cb.id, 'خطا در کسر'); return; }
+        const after = await getUser(env, String(uid));
+        const newBal = Number(after?.balance || (before - price));
         paidUsers.push(String(uid));
         meta.paid_users = paidUsers;
-        // اطلاع به کاربر از کسر سکه و موجودی جدید
-        const newBal = before - price;
         try {
-          // اعلان (alert) 3 ثانیه‌ای روی دکمه تایید
           await tgAnswerCallbackQuery(env, cb.id, `✅ ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} کسر شد\nموجودی جدید: ${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}`, { show_alert: true });
+          await tgSendMessage(env, chat_id, `💳 کسر انجام شد. موجودی فعلی: <b>${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
         } catch {}
       }
       if (!already) {
