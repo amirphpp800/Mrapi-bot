@@ -8,12 +8,7 @@ export async function onRequest(context) {
   if (!app || typeof app.fetch !== 'function') {
     return new Response('Application not initialized', { status: 500 });
   }
-  try {
-    return await app.fetch(request, env, { waitUntil });
-  } catch (err) {
-    const body = `Runtime error in app.fetch\n${(err && err.message) || String(err)}\n\n${err && err.stack ? err.stack : ''}`;
-    return new Response(body, { status: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
-  }
+  return app.fetch(request, env, { waitUntil });
 }
 
 
