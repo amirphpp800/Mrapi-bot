@@ -1,5 +1,5 @@
 /*
-Cloudflare Worker — Telegram WireGuard Bot (Enhanced)
+Cloudflare Worker — Telegram Bot (Enhanced)
 */
 
 import ranges from './ranges.js';
@@ -1009,7 +1009,22 @@ async function sendMainMenu(env, chatId, uid, opts = {}) {
     }
   } catch (_) {}
 
-  const replyMarkup = await buildDynamicMainMenu(env, uid);
+  // Build a deterministic multi-row menu to guarantee visibility
+  const rows = [];
+  rows.push([{ text: '💳 خرید سکه', callback_data: 'BUY_DIAMONDS' }]);
+  rows.push([
+    { text: '👥 زیرمجموعه گیری', callback_data: 'SUB:REFERRAL' },
+    { text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }
+  ]);
+  rows.push([
+    { text: '🎁 کد هدیه', callback_data: 'REDEEM_GIFT' },
+    { text: '🔑 دریافت با توکن', callback_data: 'GET_BY_TOKEN' }
+  ]);
+  if (isAdmin(uid)) {
+    rows.push([{ text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' }]);
+    rows.push([{ text: '🛠 پنل مدیریت', callback_data: 'ADMIN:PANEL' }]);
+  }
+  const replyMarkup = { inline_keyboard: rows };
   await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyMarkup });
 }
 
