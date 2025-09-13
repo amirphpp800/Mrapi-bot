@@ -1008,31 +1008,14 @@ async function sendMainMenu(env, chatId, uid, opts = {}) {
       }
     }
   } catch (_) {}
-
-  // Build a deterministic multi-row menu to guarantee visibility
-  const rows = [];
-  rows.push([{ text: '💳 خرید سکه', callback_data: 'BUY_DIAMONDS' }]);
-  rows.push([
-    { text: '👥 زیرمجموعه گیری', callback_data: 'SUB:REFERRAL' },
-    { text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }
-  ]);
-  rows.push([
-    { text: '🎁 کد هدیه', callback_data: 'REDEEM_GIFT' },
-    { text: '🔑 دریافت با توکن', callback_data: 'GET_BY_TOKEN' }
-  ]);
-  if (isAdmin(uid)) {
-    rows.push([{ text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' }]);
-    rows.push([{ text: '🛠 پنل مدیریت', callback_data: 'ADMIN:PANEL' }]);
-  }
-  const replyMarkup = { inline_keyboard: rows };
+  const kb = await buildDynamicMainMenu(env, uid);
   try {
-    const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyMarkup });
-    if (!res || !res.ok) throw new Error(res && (res.description || res.error) || 'send_failed');
+    const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: kb });
+    if (!res || !res.ok) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ خطا در ارسال منو: ${res && (res.description || res.error) || 'unknown'}` });
+    }
   } catch (e) {
-    // Fallback minimal inline keyboard and surface error for debugging
-    const minimal = { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] };
-    await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: minimal });
-    try { await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ خطا در نمایش دکمه‌ها: ${String(e && e.message || e)}` }); } catch (_) {}
+    await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ استثنا هنگام ارسال منو: ${String(e && e.message || e)}` });
   }
 }
 
@@ -1100,12 +1083,37 @@ async function onMessage(msg, env) {
   const text = (msg.text || '').trim();
   // 1) Handle /start FIRST (as on.js), so the first response is immediate
   if (text.startsWith('/start')) {
+    // Respect update mode like on.js
+    try {
+      const updateMode = (await kvGetJson(env, 'bot:update_mode')) || false;
+      if (updateMode && !isAdmin(uid)) {
+        await tgApi('sendMessage', { chat_id: chatId, text: '🔧 ربات در حال بروزرسانی است. لطفاً دقایقی دیگر مجدداً تلاش کنید.' });
+        return;
+      }
+    } catch (_) {}
+
+    // Reset session on /start as in on.js
+    try { await setSession(env, uid, {}); } catch (_) {}
+
     const parts = text.split(/\s+/);
     const payload = parts[1] || '';
     // Support '/start d_<token>' deep-links to deliver content inside bot
     if (payload && payload.startsWith('d_')) {
       const token = payload.slice(2).trim();
       if (token) { await handleBotDownload(env, uid, chatId, token, null); return; }
+    }
+    // Support referral-only deep links: /start <refId>
+    if (payload && !payload.startsWith('d_')) {
+      const refIdNum = Number(payload);
+      if (Number.isFinite(refIdNum) && refIdNum > 0 && refIdNum !== Number(uid)) {
+        try {
+          const currentUser = (await kvGetJson(env, `user:${uid}`)) || { id: uid };
+          if (!currentUser.referred_by) {
+            currentUser.referred_by = refIdNum;
+            await kvPutJson(env, `user:${uid}`, currentUser);
+          }
+        } catch (_) {}
+      }
     }
     // Default: show main menu (skip join check on first start for immediate UX)
     await sendMainMenu(env, chatId, uid, { skipJoin: true });
