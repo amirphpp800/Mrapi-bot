@@ -1367,6 +1367,28 @@ async function onCallback(cb, env) {
       return;
     }
 
+    // تایید یا لغو دریافت فایل با کسر سکه
+    if (data.startsWith('confirm_buy:')) {
+      const token = (data.split(':')[1] || '').trim();
+      if (!/^[A-Za-z0-9]{6}$/.test(token)) { await tgAnswerCallbackQuery(env, cb.id, 'توکن نامعتبر'); return; }
+      // تحویل فایل (کسر سکه داخل deliverFileToUser انجام می‌شود)
+      const ok = await deliverFileToUser(env, uid, chat_id, token);
+      if (ok) {
+        try { await tgEditReplyMarkup(env, chat_id, mid, { inline_keyboard: [] }); } catch {}
+        await tgAnswerCallbackQuery(env, cb.id, 'ارسال فایل');
+        await clearUserState(env, uid);
+      } else {
+        await tgAnswerCallbackQuery(env, cb.id, 'ناموفق');
+      }
+      return;
+    }
+    if (data === 'cancel_buy') {
+      try { await tgEditReplyMarkup(env, chat_id, mid, { inline_keyboard: [] }); } catch {}
+      await tgSendMessage(env, chat_id, 'عملیات لغو شد.');
+      await tgAnswerCallbackQuery(env, cb.id, 'لغو شد');
+      return;
+    }
+
     if (data === 'redeem_token') {
       await setUserState(env, uid, { step: 'redeem_token_wait' });
       await tgEditMessage(env, chat_id, mid, '🔑 لطفاً توکن دریافتی را ارسال کنید. /update برای لغو', {});
@@ -1956,9 +1978,9 @@ async function sendWelcome(chat_id, uid, env, msg) {
         try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید ثبت شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
       }
     }
-    // اگر /start <token> بود، فایل را پس از تایید عضویت ارسال کن
+    // اگر /start <token> بود، ابتدا جریان دریافت با تایید کسر سکه را اجرا کن
     if (startToken) {
-      await deliverFileToUser(env, uid, chat_id, startToken);
+      await handleTokenRedeem(env, uid, chat_id, startToken);
       return;
     }
     const hdr = await mainMenuHeader(env);
