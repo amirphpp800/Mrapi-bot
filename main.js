@@ -123,12 +123,14 @@ function buildPurchaseCaption(p) {
   const lines = [];
   lines.push('💸 <b>درخواست خرید سکه</b>');
   lines.push(`👤 کاربر: <code>${p.user_id}</code>`);
-  lines.push(`🪙 پلن: <b>${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
-  lines.push(`💰 مبلغ: <b>${p.amount_label}</b>`);
+  if (p.coins != null) lines.push(`🪙 پلن: <b>${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
+  if (p.amount_label) lines.push(`💰 مبلغ: <b>${p.amount_label}</b>`);
   lines.push(`🆔 شناسه: <code>${p.id}</code>`);
-  if (p.status && p.status !== 'pending') {
+  // وضعیت سفارش
+  if (!p.status || p.status === 'pending') {
+    lines.push('⏳ وضعیت: در انتظار بررسی');
+  } else {
     const st = p.status === 'approved' ? '✅ تایید شد' : '❌ رد شد';
-    lines.push('');
     lines.push(st);
     if (p.reason && p.status === 'rejected') lines.push(`دلیل: ${p.reason}`);
   }
@@ -621,6 +623,8 @@ function adminMenuKb(settings) {
     [ { text: '📢 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     // Row 6: Subtract | Add Coins
     [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
+    // Row 7: Broadcast
+    [ { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
     // Row 7: Help
     [ { text: '📘 راهنمای دستورات', callback_data: 'help' } ],
   ]);
@@ -1007,8 +1011,19 @@ async function onMessage(msg, env) {
         if (state?.step === 'adm_add_amount') {
           const amount = Number(text.replace(/[^0-9]/g, ''));
           if (!amount || amount <= 0) { await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است.'); return; }
+          const before = await getUser(env, state.target);
+          const prevBal = Number(before?.balance || 0);
           const ok = await creditBalance(env, state.target, amount);
-          await tgSendMessage(env, chat_id, ok ? `✅ ${fmtNum(amount)} سکه به کاربر ${state.target} افزوده شد.` : '❌ انجام نشد.');
+          const after = await getUser(env, state.target);
+          const newBal = Number(after?.balance || prevBal);
+          if (ok) {
+            // Notify target user
+            try { await tgSendMessage(env, state.target, `➕ ${fmtNum(amount)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد.\nموجودی فعلی: <b>${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}</b>`); } catch {}
+            // Notify admin
+            await tgSendMessage(env, chat_id, `✅ ${fmtNum(amount)} ${CONFIG.DEFAULT_CURRENCY} به کاربر <code>${state.target}</code> افزوده شد.\nموجودی فعلی کاربر: <b>${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
+          } else {
+            await tgSendMessage(env, chat_id, '❌ انجام نشد.');
+          }
           await clearUserState(env, uid);
           return;
         }
@@ -1022,9 +1037,29 @@ async function onMessage(msg, env) {
         if (state?.step === 'adm_sub_amount') {
           const amount = Number(text.replace(/[^0-9]/g, ''));
           if (!amount || amount <= 0) { await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است.'); return; }
+          const before = await getUser(env, state.target);
+          const prevBal = Number(before?.balance || 0);
           const ok = await subtractBalance(env, state.target, amount);
-          await tgSendMessage(env, chat_id, ok ? `✅ ${fmtNum(amount)} سکه از کاربر ${state.target} کسر شد.` : '❌ انجام نشد (شاید موجودی کافی نیست).');
+          const after = await getUser(env, state.target);
+          const newBal = Number(after?.balance ?? prevBal);
+          if (ok) {
+            // Notify target user
+            try { await tgSendMessage(env, state.target, `➖ ${fmtNum(amount)} ${CONFIG.DEFAULT_CURRENCY} از حساب شما کسر شد.\nموجودی فعلی: <b>${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}</b>`); } catch {}
+            // Notify admin
+            await tgSendMessage(env, chat_id, `✅ ${fmtNum(amount)} ${CONFIG.DEFAULT_CURRENCY} از کاربر <code>${state.target}</code> کسر شد.\nموجودی فعلی کاربر: <b>${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
+          } else {
+            await tgSendMessage(env, chat_id, '❌ انجام نشد (شاید موجودی کافی نیست).');
+          }
           await clearUserState(env, uid);
+          return;
+        }
+        if (state?.step === 'adm_broadcast_wait') {
+          const msgText = (text || '').trim();
+          if (!msgText) { await tgSendMessage(env, chat_id, '❌ متن نامعتبر است.'); return; }
+          await tgSendMessage(env, chat_id, 'در حال ارسال پیام همگانی...');
+          const { total, sent, failed } = await broadcastToAllUsers(env, msgText);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `📢 نتیجه ارسال:\nمخاطبان: ${fmtNum(total)}\nارسال موفق: ${fmtNum(sent)}\nناموفق: ${fmtNum(failed)}`);
           return;
         }
         if (state?.step === 'buy_reject_reason' && state?.purchase_id && state?.target_uid) {
@@ -1241,7 +1276,8 @@ async function onCallback(cb, env) {
         'اطلاعات پرداخت',
         `پلن انتخابی: ${plan.coins} ${CONFIG.DEFAULT_CURRENCY}`,
         `مبلغ: ${plan.price_label}`,
-        `شماره کارت: ${card.card_number}`,
+        'شماره کارت:',
+        `<code>${card.card_number}</code>`,
         `به نام: ${card.holder_name}`,
         '',
         card.pay_note,
@@ -1417,11 +1453,17 @@ async function onCallback(cb, env) {
               await tgEditReplyMarkup(env, m.chat_id, m.message_id, kb([[{ text: ' تایید شد', callback_data: 'noop' }]]).reply_markup);
             } catch {}
           }
-          try { await tgSendMessage(env, String(p.user_id), ` ${fmtNum(p.coins)}  به حساب شما افزوده شد. سپاس از پرداخت شما.`); } catch {}
+          try { await tgSendMessage(env, String(p.user_id), `❤️ ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد. سپاس از پرداخت شما.`); } catch {}
           await tgAnswerCallbackQuery(env, cb.id, 'واریز شد');
         } else {
           await tgAnswerCallbackQuery(env, cb.id, 'خطا در واریز');
         }
+        return;
+      }
+      if (data === 'adm_broadcast') {
+        await setUserState(env, uid, { step: 'adm_broadcast_wait' });
+        await tgEditMessage(env, chat_id, mid, '✍️ متن پیام همگانی را ارسال کنید. /update برای لغو', {});
+        await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data.startsWith('buy_reject:')) {
@@ -1714,6 +1756,39 @@ async function listDownloadsByUser(env, uid, limit = 10) {
     items.sort((a, b) => (b?.ts || 0) - (a?.ts || 0));
     return items.slice(0, limit);
   } catch (e) { console.error('listDownloadsByUser error', e); return []; }
+}
+
+// Broadcast helpers
+async function listAllUserIds(env) {
+  const ids = new Set();
+  try {
+    let cursor = undefined;
+    do {
+      const resp = await env.BOT_KV.list({ prefix: CONFIG.USER_PREFIX, limit: 1000, cursor });
+      for (const k of resp.keys) {
+        // keys like user:<uid> and user:<uid>:state — only pick pure profile keys
+        const name = k.name;
+        const m = name.match(/^user:(\d+)$/);
+        if (m) ids.add(m[1]);
+      }
+      cursor = resp.cursor;
+      if (!resp.list_complete && !cursor) break; // safety
+    } while (cursor);
+  } catch (e) { console.error('listAllUserIds error', e); }
+  return Array.from(ids);
+}
+
+async function broadcastToAllUsers(env, text) {
+  const ids = await listAllUserIds(env);
+  let sent = 0, failed = 0;
+  for (const uid of ids) {
+    try {
+      const res = await tgSendMessage(env, uid, text);
+      if (res && res.ok) sent++; else failed++;
+      // small gap isn't necessary on CF, but avoid hitting limits too hard
+    } catch { failed++; }
+  }
+  return { total: ids.length, sent, failed };
 }
 
 async function buildUserReport(env, targetUid) {
