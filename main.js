@@ -1387,15 +1387,45 @@ async function onCallback(cb, env) {
     if (data.startsWith('confirm_buy:')) {
       const token = (data.split(':')[1] || '').trim();
       if (!/^[A-Za-z0-9]{6}$/.test(token)) { await tgAnswerCallbackQuery(env, cb.id, 'توکن نامعتبر'); return; }
-      // تحویل فایل (کسر سکه داخل deliverFileToUser انجام می‌شود)
-      const ok = await deliverFileToUser(env, uid, chat_id, token);
-      if (ok) {
-        try { await tgEditReplyMarkup(env, chat_id, mid, { inline_keyboard: [] }); } catch {}
-        await tgAnswerCallbackQuery(env, cb.id, 'ارسال فایل');
-        await clearUserState(env, uid);
-      } else {
-        await tgAnswerCallbackQuery(env, cb.id, 'ناموفق');
+      // بارگذاری متای فایل و اجرای کسر/ارسال به صورت صریح
+      const key = CONFIG.FILE_PREFIX + token;
+      const meta = await kvGet(env, key);
+      if (!meta || meta.disabled) { await tgAnswerCallbackQuery(env, cb.id, 'فایل غیرفعال'); return; }
+      const price = Number(meta.price || 0);
+      const isOwner = String(meta.owner_id) === String(uid);
+      const users = Array.isArray(meta.users) ? meta.users : [];
+      const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
+      const already = users.includes(String(uid));
+      const alreadyPaid = paidUsers.includes(String(uid));
+      if (price > 0 && !isOwner && !alreadyPaid) {
+        const u = await getUser(env, String(uid));
+        if (!u || Number(u.balance || 0) < price) {
+          await tgAnswerCallbackQuery(env, cb.id, 'موجودی کافی نیست');
+          return;
+        }
+        u.balance = Number(u.balance || 0) - price;
+        await setUser(env, String(uid), u);
+        paidUsers.push(String(uid));
+        meta.paid_users = paidUsers;
       }
+      if (!already) {
+        users.push(String(uid));
+        meta.users = users;
+      }
+      await kvSet(env, key, meta);
+      // ارسال محتوا
+      const kind = meta.kind || 'document';
+      if (kind === 'photo') {
+        await tgSendPhoto(env, chat_id, meta.file_id, { caption: `🖼 ${meta.file_name || ''}` });
+      } else if (kind === 'text') {
+        const content = meta.text || meta.file_name || '—';
+        await tgSendMessage(env, chat_id, `📄 محتوا:\n${content}`);
+      } else {
+        await tgSendDocument(env, chat_id, meta.file_id, { caption: `📄 ${meta.file_name || ''}` });
+      }
+      try { await tgEditReplyMarkup(env, chat_id, mid, { inline_keyboard: [] }); } catch {}
+      await tgAnswerCallbackQuery(env, cb.id, 'انجام شد');
+      await clearUserState(env, uid);
       return;
     }
     if (data === 'cancel_buy') {
