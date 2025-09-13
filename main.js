@@ -1280,9 +1280,9 @@ async function onCallback(cb, env) {
       }
     } catch {}
 
-    // Mandatory join check
+    // Mandatory join check (اجازه بده تایید/لغو خرید بدون بررسی مجدد انجام شود)
     const joined = await ensureJoinedChannels(env, uid, chat_id);
-    if (!joined && data !== 'join_check') {
+    if (!joined && data !== 'join_check' && !data.startsWith('confirm_buy') && data !== 'cancel_buy') {
       await tgAnswerCallbackQuery(env, cb.id, 'ابتدا عضو کانال‌ها شوید');
       return;
     }
