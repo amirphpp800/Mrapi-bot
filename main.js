@@ -381,11 +381,15 @@ function adminMenuKb(settings) {
   const enabled = settings?.service_enabled !== false;
   const updating = settings?.update_mode === true;
   return kb([
-    [ { text: enabled ? '🟢 سرویس فعال' : '🔴 سرویس غیرفعال', callback_data: 'adm_toggle' }, { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' } ],
-    [ { text: '📊 آمار ربات', callback_data: 'adm_stats' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
-    [ { text: '⬆️ بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' } ],
-    [ { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' }, { text: '✅ تایید معرفی‌ها', callback_data: 'adm_refs' } ],
+    [
+      { text: enabled ? '🟢 سرویس فعال' : '🔴 سرویس غیرفعال', callback_data: 'adm_toggle' },
+      { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' }
+    ],
+    [ { text: '⬆️ بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
+    [ { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' }, { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' } ],
+    [ { text: '✅ تایید معرفی‌ها', callback_data: 'adm_refs' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     [ { text: '➕ افزودن سکه', callback_data: 'adm_add' }, { text: '➖ کسر سکه', callback_data: 'adm_sub' } ],
+    [ { text: '🧾 قیمت هر سکه', callback_data: 'adm_cost' } ],
   ]);
 }
 
@@ -548,6 +552,14 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, 'سرویس موقتاً غیرفعال است. لطفاً بعداً تلاش کنید.');
         return;
       }
+      if (data === 'adm_cost') {
+        await setUserState(env, uid, { step: 'adm_cost_wait' });
+        const s = await getSettings(env);
+        const cur = s?.price_per_coin ? `قیمت فعلی هر 🪙 سکه: ${fmtNum(s.price_per_coin)} تومان` : 'قیمت فعلی تنظیم نشده است';
+        await tgEditMessage(env, chat_id, mid, `${cur}\nمقدار جدید را به تومان ارسال کنید:`, {});
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
 
       // اگر ادمین در فلو آپلود است
       const st = await getUserState(env, uid);
@@ -640,6 +652,15 @@ async function onMessage(msg, env) {
         const base = await getBaseUrlFromBot(env);
         const link = `${base}/f/${token}?uid=${uid}`;
         await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nلینک: ${link}`);
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_cost_wait') {
+        const amount = Number(text.replace(/[^0-9]/g, ''));
+        const s = await getSettings(env);
+        s.price_per_coin = amount > 0 ? amount : 0;
+        await setSettings(env, s);
+        await tgSendMessage(env, chat_id, `🧾 قیمت هر 🪙 سکه تنظیم شد: ${fmtNum(s.price_per_coin)} تومان`);
+        await clearUserState(env, uid);
         return;
       }
       // Admin flows
