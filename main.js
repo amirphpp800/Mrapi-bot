@@ -579,6 +579,7 @@ function kindIcon(kind) {
 function getKnownUserButtons() {
   return [
     { label: '👤 حساب کاربری', data: 'account' },
+    { label: '👥 زیرمجموعه‌گیری', data: 'referrals' },
     { label: '🎁 کد هدیه', data: 'giftcode' },
     { label: '🔑 وارد کردن توکن فایل', data: 'redeem_token' },
     { label: '🪙 خرید سکه', data: 'buy_coins' },
