@@ -66,15 +66,18 @@ async function deliverFileToUser(env, uid, chat_id, token) {
       return false;
     }
     const users = Array.isArray(meta.users) ? meta.users : [];
+    const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
     const maxUsers = Number(meta.max_users || 0);
     const price = Number(meta.price || 0);
     const isOwner = String(meta.owner_id) === String(uid);
     const already = users.includes(String(uid));
+    const alreadyPaid = paidUsers.includes(String(uid));
     if (!already && maxUsers > 0 && users.length >= maxUsers) {
       await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.');
       return false;
     }
-    if (!already && price > 0 && !isOwner) {
+    // در صورت قیمت‌دار بودن، فقط اگر قبلاً پرداخت نشده کسر کن
+    if (price > 0 && !isOwner && !alreadyPaid) {
       const u = await getUser(env, String(uid));
       if (!u || Number(u.balance || 0) < price) {
         await tgSendMessage(env, chat_id, 'موجودی شما برای دریافت فایل کافی نیست.');
@@ -82,6 +85,9 @@ async function deliverFileToUser(env, uid, chat_id, token) {
       }
       u.balance = Number(u.balance || 0) - price;
       await setUser(env, String(uid), u);
+      paidUsers.push(String(uid));
+      meta.paid_users = paidUsers;
+      await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
     }
     if (!already) {
       users.push(String(uid));
@@ -166,10 +172,13 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
     const meta = await kvGet(env, CONFIG.FILE_PREFIX + t);
     if (!meta || meta.disabled) { await tgSendMessage(env, chat_id, 'فایل یافت نشد یا غیرفعال است.'); return; }
     const users = Array.isArray(meta.users) ? meta.users : [];
+    const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
     const isOwner = String(meta.owner_id) === String(uid);
     const price = Number(meta.price || 0);
     const already = users.includes(String(uid));
-    if (!already && price > 0 && !isOwner) {
+    const alreadyPaid = paidUsers.includes(String(uid));
+    // اگر قیمت‌دار است و هنوز پرداخت نشده (حتی اگر قبلاً در users ثبت شده)، تایید بگیر
+    if (price > 0 && !isOwner && !alreadyPaid) {
       const kbBuy = kb([[{ text: `✅ تایید (کسر ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY})`, callback_data: 'confirm_buy:' + t }], [{ text: '❌ انصراف', callback_data: 'cancel_buy' }]]);
       await tgSendMessage(env, chat_id, `این فایل برای دریافت به <b>${fmtNum(price)}</b> ${CONFIG.DEFAULT_CURRENCY} نیاز دارد. آیا مایل به ادامه هستید؟`, kbBuy);
       return;
@@ -717,14 +726,16 @@ async function handleFileDownload(request, env) {
     try {
       // اگر محدودیت تعریف شده
       const users = Array.isArray(meta.users) ? meta.users : [];
+      const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
       const maxUsers = Number(meta.max_users || 0);
       const price = Number(meta.price || 0);
       const isOwner = String(meta.owner_id) === String(uid);
       const already = users.includes(String(uid));
+      const alreadyPaid = paidUsers.includes(String(uid));
       if (!already && maxUsers > 0 && users.length >= maxUsers) {
         return new Response('ظرفیت دریافت این فایل تکمیل شده است.', { status: 403 });
       }
-      if (!already && price > 0 && !isOwner) {
+      if (price > 0 && !isOwner && !alreadyPaid) {
         const u = await getUser(env, String(uid));
         if (!u || Number(u.balance || 0) < price) {
           return new Response('موجودی شما برای دریافت فایل کافی نیست.', { status: 402 });
@@ -732,6 +743,9 @@ async function handleFileDownload(request, env) {
         // کسر سکه و ثبت کاربر
         u.balance = Number(u.balance || 0) - price;
         await setUser(env, String(uid), u);
+        paidUsers.push(String(uid));
+        meta.paid_users = paidUsers;
+        await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
       }
       if (!already) {
         users.push(String(uid));
