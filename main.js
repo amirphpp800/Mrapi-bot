@@ -48,13 +48,13 @@ async function onCallback(cb, env) {
 
     // Simple router
     if (data === 'MENU') {
-      await sendMainMenu(env, chatId, uid, { skipJoin: true });
+      await sendMainMenu(env, chatId, uid);
       return;
     }
     if (data === 'CHECK_JOIN') {
       const joined = await isUserJoinedAllRequiredChannels(env, uid);
       if (joined) {
-        await sendMainMenu(env, chatId, uid, { skipJoin: true });
+        await sendMainMenu(env, chatId, uid);
       } else {
         await presentJoinPrompt(env, chatId);
       }
@@ -1144,15 +1144,21 @@ async function onMessage(msg, env) {
   }
 
   const text = (msg.text || '').trim();
+  // Enforce join to required channels for non-admins on all commands except initial /start
+  try {
+    const requireJoin = await getRequiredChannels(env);
+    if (!text.startsWith('/start') && requireJoin.length && !isAdmin(uid)) {
+      const joinedAll = await isUserJoinedAllRequiredChannels(env, uid);
+      if (!joinedAll) { await presentJoinPrompt(env, chatId); return; }
+    }
+  } catch (_) {}
   // Text-based fallbacks for reply keyboard buttons (in case inline keyboards fail)
-  if (text === '🏠 منو') { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
-  if (text === '👤 حساب کاربری') { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
+  if (text === '🏠 منو') { await sendMainMenu(env, chatId, uid); return; }
+  if (text === '👤 حساب کاربری') { await sendMainMenu(env, chatId, uid); return; }
   // If no text present (e.g., some clients), still show menu
-  if (!text) { await sendMainMenu(env, chatId, uid, { skipJoin: true }); return; }
+  if (!text) { await sendMainMenu(env, chatId, uid); return; }
   // /start: show menu or handle deep-link payloads
   if (text.startsWith('/start')) {
-    // Diagnostic: confirm /start path is reached
-    try { await tgApi('sendMessage', { chat_id: chatId, text: '🟢 شروع دریافت شد، در حال نمایش منو…' }); } catch (_) {}
     const parts = text.split(/\s+/);
     const payload = parts[1] || '';
     // Support '/start d_<token>' deep-links to deliver content inside bot
@@ -1163,7 +1169,7 @@ async function onMessage(msg, env) {
         return;
       }
     }
-    // Default: show main menu (skip join check to ensure visibility)
+    // Default: show main menu (skip join check on first start for immediate UX)
     await sendMainMenu(env, chatId, uid, { skipJoin: true });
     return;
   }
@@ -1172,8 +1178,8 @@ async function onMessage(msg, env) {
     await tgApi('sendMessage', { chat_id: chatId, text: 'در حال بروزرسانی به آخرین نسخه…' });
     await sleep(6500);
     await tgApi('sendMessage', { chat_id: chatId, text: 'بروزرسانی انجام شد ✅' });
-    // پس از آپدیت، بدون بررسی عضویت منو را نمایش بده
-    await sendMainMenu(env, chatId, uid, { skipJoin: true });
+    // پس از آپدیت، عضویت اجباری را بررسی کن؛ در صورت عدم عضویت فقط پیام جوین نشان داده شود
+    await sendMainMenu(env, chatId, uid);
     return;
   }
 
@@ -1763,7 +1769,7 @@ async function onMessage(msg, env) {
   if (data === 'ADMIN:TAKEPOINTS' && isAdmin(uid)) {
     await setSession(env, uid, { awaiting: 'takepoints_uid' });
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
-    await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی عددی کاربر برای کسر الماس را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی عددی کاربر برای کسر سکه را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
     return;
   }
   if (data === 'ADMIN:FREEZE' && isAdmin(uid)) {
@@ -1812,8 +1818,8 @@ async function onMessage(msg, env) {
     await kvPutJson(env, userKey, user);
     purchase.status = 'approved'; purchase.processed_by = uid; purchase.processed_at = now();
     await kvPutJson(env, key, purchase);
-    await tgApi('sendMessage', { chat_id: purchase.user_id, text: `✅ پرداخت شما تایید شد. ${purchase.diamonds} الماس به حساب شما اضافه شد.` });
-    await tgApi('sendMessage', { chat_id: chatId, text: `انجام شد. ${purchase.diamonds} الماس به کاربر ${purchase.user_id} اضافه شد.` });
+    await tgApi('sendMessage', { chat_id: purchase.user_id, text: `✅ پرداخت شما تایید شد. ${purchase.diamonds} سکه به حساب شما اضافه شد.` });
+    await tgApi('sendMessage', { chat_id: chatId, text: `انجام شد. ${purchase.diamonds} سکه به کاربر ${purchase.user_id} اضافه شد.` });
     return;
   }
   if (data.startsWith('PAYREJ:') && isAdmin(uid)) {
@@ -1931,7 +1937,7 @@ ${link}
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     const top = await computeTopReferrers(env, 10);
     const text = top.length
-      ? '🏷 معرفین برتر (۱۰ نفر):\n' + top.map((u, i) => `${i+1}. ${u.id} ${u.username ? `(@${u.username})` : ''} — معرفی‌ها: ${u.referrals||0} | الماس: ${u.diamonds||0}`).join('\n')
+      ? '🏷 معرفین برتر (۱۰ نفر):\n' + top.map((u, i) => `${i+1}. ${u.id} ${u.username ? `(@${u.username})` : ''} — معرفی‌ها: ${u.referrals||0} | سکه: ${u.diamonds||0}`).join('\n')
       : '— هیچ داده‌ای یافت نشد.';
     const kb = { inline_keyboard: [
       [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:STATS' }]
@@ -1943,7 +1949,7 @@ ${link}
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     const top = await computeTopPurchasers(env, 10);
     const text = top.length
-      ? '💰 خریداران برتر (۱۰ نفر):\n' + top.map((u, i) => `${i+1}. ${u.user_id} ${u.username ? `(@${u.username})` : ''} — خرید: ${u.count||0} | الماس: ${u.diamonds||0} | مبلغ: ${(u.amount||0).toLocaleString('fa-IR')}ت`).join('\n')
+      ? '💰 خریداران برتر (۱۰ نفر):\n' + top.map((u, i) => `${i+1}. ${u.user_id} ${u.username ? `(@${u.username})` : ''} — خرید: ${u.count||0} | سکه: ${u.diamonds||0} | مبلغ: ${(u.amount||0).toLocaleString('fa-IR')}ت`).join('\n')
       : '— هیچ داده‌ای یافت نشد.';
     const kb = { inline_keyboard: [
       [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:STATS' }]
@@ -1961,7 +1967,7 @@ ${link}
       const rec = (await kvGetJson(env, `points_week:${u}:${wk}`)) || { points: 0 };
       if ((rec.points || 0) > topPts) { topPts = rec.points || 0; topUser = u; }
     }
-    const highestWeekly = topUser ? `${topUser} — ${topPts} الماس` : '—';
+    const highestWeekly = topUser ? `${topUser} — ${topPts} سکه` : '—';
     const text = `📊 آمار جزئی\n\n🏆 بیشترین امتیاز کسب‌شده در این هفته: ${highestWeekly}\n\nدکمه‌های بیشتر:`;
     const rows = [
       [{ text: '🏆 بیشترین امتیاز هفته (تازه‌سازی)', callback_data: 'ADMIN:STATS:DETAILS' }],
@@ -2930,13 +2936,13 @@ async function handleBotDownload(env, uid, chatId, token, ref) {
   if ((user.diamonds || 0) < needed) {
   const botUsername = await getBotUsername(env);
   const refLink = botUsername ? `https://t.me/${botUsername}?start=${uid}` : '';
-    await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ الماس کافی ندارید. نیاز: ${needed} | الماس شما: ${user.diamonds||0}${refLink ? `\nبرای کسب الماس لینک معرفی شما:\n${refLink}` : ''}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ سکه کافی ندارید. نیاز: ${needed} | سکه شما: ${user.diamonds||0}${refLink ? `\nبرای کسب سکه لینک معرفی شما:\n${refLink}` : ''}` });
       return;
     }
     const ok = await checkRateLimit(env, uid, 'confirm_spend', 3, 60_000);
     if (!ok) { await tgApi('sendMessage', { chat_id: chatId, text: 'تعداد درخواست بیش از حد. لطفاً بعداً تلاش کنید.' }); return; }
     await setSession(env, uid, { awaiting: `confirm_spend:${token}:${needed}:${ref||''}` });
-  await tgApi('sendMessage', { chat_id: chatId, text: `این فایل ${needed} الماس هزینه دارد. مایل به پرداخت هستید؟`, reply_markup: { inline_keyboard: [
+  await tgApi('sendMessage', { chat_id: chatId, text: `این فایل ${needed} سکه هزینه دارد. مایل به پرداخت هستید؟`, reply_markup: { inline_keyboard: [
       [{ text: '✅ بله، پرداخت و دریافت', callback_data: `CONFIRM_SPEND:${token}:${needed}:${ref||''}` }],
       [{ text: '❌ خیر، بازگشت به منو', callback_data: 'MENU' }]
     ] } });
@@ -2955,7 +2961,7 @@ async function handleBotDownload(env, uid, chatId, token, ref) {
         currentUser.ref_credited = true;
         currentUser.referred_by = currentUser.referred_by || Number(ref);
         await kvPutJson(env, `user:${uid}`, currentUser);
-         await tgApi('sendMessage', { chat_id: Number(ref), text: '🎉 یک الماس بابت معرفی دریافت کردید.' });
+         await tgApi('sendMessage', { chat_id: Number(ref), text: '🎉 یک سکه بابت معرفی دریافت کردید.' });
       }
     }
   }
@@ -3052,7 +3058,7 @@ async function buildMissionsView(env, uid) {
     const done = Boolean((prog.map||{})[markKey]);
     const periodLabel = m.period === 'weekly' ? 'هفتگی' : (m.period === 'daily' ? 'روزانه' : 'یکبار');
     const typeLabel = m.type === 'quiz' ? 'کوییز' : (m.type === 'question' ? 'مسابقه' : (m.type === 'invite' ? 'دعوت' : 'عمومی'));
-    return `${done ? '✅' : '⬜️'} ${m.title} (${periodLabel} | ${typeLabel}) +${m.reward} الماس`;
+    return `${done ? '✅' : '⬜️'} ${m.title} (${periodLabel} | ${typeLabel}) +${m.reward} سکه`;
   }).join('\n');
   const actions = [];
   actions.push([{ text: '✅ دریافت پاداش هفتگی (هر ۷ روز)', callback_data: 'WEEKLY_CHECKIN' }]);
@@ -3062,7 +3068,7 @@ async function buildMissionsView(env, uid) {
   if (quiz) actions.push([{ text: '🎮 شرکت در کوییز هفتگی', callback_data: `MIS:QUIZ:${quiz.id}` }]);
   if (question) actions.push([{ text: '❓ پاسخ سوال هفتگی', callback_data: `MIS:Q:${question.id}` }]);
   actions.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
-  return { text: `📆 مأموریت‌ها:\n${list}\n\nبا انجام فعالیت‌ها و چک‌این هفتگی الماس بگیرید.`, reply_markup: { inline_keyboard: actions } };
+  return { text: `📆 مأموریت‌ها:\n${list}\n\nبا انجام فعالیت‌ها و چک‌این هفتگی سکه بگیرید.`, reply_markup: { inline_keyboard: actions } };
 }
 
 /* -------------------- Lottery helpers -------------------- */
@@ -3269,7 +3275,7 @@ async function redeemGiftCode(env, uid, code) {
   await kvPutJson(env, usedKey, { used_at: now() });
   meta.used = (meta.used || 0) + 1;
   await kvPutJson(env, key, meta);
-  return { ok: true, message: `🎁 ${meta.amount} الماس به حساب شما اضافه شد.` };
+  return { ok: true, message: `🎁 ${meta.amount} سکه به حساب شما اضافه شد.` };
 }
 
 /* -------------------- Panel items (Buy Panel) -------------------- */
