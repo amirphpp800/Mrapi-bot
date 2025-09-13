@@ -1274,6 +1274,9 @@ async function onCallback(cb, env) {
     const chat_id = cb.message?.chat?.id;
     const mid = cb.message?.message_id;
 
+    // Ensure user profile exists for balance operations
+    try { await ensureUser(env, uid, from); } catch {}
+
     // Update mode: block non-admin users from using buttons
     try {
       const s = await getSettings(env);
@@ -1403,10 +1406,14 @@ async function onCallback(cb, env) {
           await tgAnswerCallbackQuery(env, cb.id, 'موجودی کافی نیست');
           return;
         }
-        u.balance = Number(u.balance || 0) - price;
+        const before = Number(u.balance || 0);
+        u.balance = before - price;
         await setUser(env, String(uid), u);
         paidUsers.push(String(uid));
         meta.paid_users = paidUsers;
+        // اطلاع به کاربر از کسر سکه و موجودی جدید
+        const newBal = before - price;
+        try { await tgSendMessage(env, chat_id, `✅ ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} کسر شد.\nموجودی فعلی: <b>${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}</b>`); } catch {}
       }
       if (!already) {
         users.push(String(uid));
