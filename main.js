@@ -177,8 +177,10 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
     const price = Number(meta.price || 0);
     const already = users.includes(String(uid));
     const alreadyPaid = paidUsers.includes(String(uid));
-    // اگر قیمت‌دار است و هنوز پرداخت نشده (حتی اگر قبلاً در users ثبت شده)، تایید بگیر
-    if (price > 0 && !isOwner && !alreadyPaid) {
+    // در مسیر وارد کردن توکن در ربات، اگر فایل قیمت‌دار است و کاربر مالک نیست، همیشه تاییدیه نمایش بده
+    if (price > 0 && !isOwner) {
+      // ذخیره state برای تایید بعدی
+      await setUserState(env, uid, { step: 'confirm_token', token: t, price });
       const kbBuy = kb([[{ text: `✅ تایید (کسر ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY})`, callback_data: 'confirm_buy:' + t }], [{ text: '❌ انصراف', callback_data: 'cancel_buy' }]]);
       await tgSendMessage(env, chat_id, `این فایل برای دریافت به <b>${fmtNum(price)}</b> ${CONFIG.DEFAULT_CURRENCY} نیاز دارد. آیا مایل به ادامه هستید؟`, kbBuy);
       return;
