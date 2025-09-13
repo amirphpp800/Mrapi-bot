@@ -526,14 +526,14 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
         const isMember = status && !['left', 'kicked'].includes(status);
         if (!isMember) {
           if (!silent) {
-            await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
+            await tgSendMessage(env, chat_id, '📣 برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه «بررسی عضویت» را بزنید:', await buildJoinKb(env));
           }
           return false;
         }
       } catch (e) {
         // On temporary Telegram errors, avoid blocking; optionally show guide
         if (!silent) {
-          await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
+          await tgSendMessage(env, chat_id, '📣 برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه «بررسی عضویت» را بزنید:', await buildJoinKb(env));
         }
         return false;
       }
@@ -575,17 +575,15 @@ function kindIcon(kind) {
   return '📄';
 }
 
-// لیست شناخته‌شده‌ای از callback_data ها برای مدیریت سریع دکمه‌های غیرفعال
-function getKnownCallbacks() {
+// فهرست دکمه‌های کاربری (نه ادمین) با برچسب انسان‌خوان و callback_data
+function getKnownUserButtons() {
   return [
-    // منوی اصلی کاربر
-    'referrals', 'account', 'giftcode', 'redeem_token', 'buy_coins',
-    // حساب و تیکت کاربر
-    'ticket_new', 'back_main',
-    // خرید
-    'buy_plan:p1', 'buy_plan:p2', 'buy_plan:p3', // شناسه‌های نمونه پلن‌ها
-    // ادمین — نمایش فقط برای مدیریت (غیرفعال‌سازی برای کاربر معمولی کاربرد دارد)
-    'admin', 'adm_service', 'adm_stats', 'adm_join', 'adm_add', 'adm_sub', 'adm_gifts', 'adm_tickets', 'fm', 'myfiles',
+    { label: '👤 حساب کاربری', data: 'account' },
+    { label: '🎁 کد هدیه', data: 'giftcode' },
+    { label: '🔑 وارد کردن توکن فایل', data: 'redeem_token' },
+    { label: '🪙 خرید سکه', data: 'buy_coins' },
+    { label: '🎟 ثبت تیکت', data: 'ticket_new' },
+    { label: '🔙 بازگشت', data: 'back_main' },
   ];
 }
 
@@ -643,7 +641,7 @@ function adminMenuKb(settings) {
     // Row 4: Service Settings (feature toggles)
     [ { text: '⚙️ تنظیمات سرویس', callback_data: 'adm_service' } ],
     // Row 5: Join Mandatory | Bot Stats
-    [ { text: '📢 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
+    [ { text: '📣 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     // Row 6: Subtract | Add Coins
     [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
     // Row 7: Help + Broadcast in same row
@@ -1093,10 +1091,74 @@ async function onMessage(msg, env) {
             t.replies.push({ from_admin: true, text: replyText, ts: nowTs() });
             t.status = 'answered';
             await saveTicket(env, t);
-            try { await tgSendMessage(env, state.target_uid, `📩 پاسخ پشتیبانی:\n${replyText}`); } catch {}
+            try { await tgSendMessage(env, state.target_uid, `📩 پاسخ به تیکت شماره ${t.id}:\n${replyText}`); } catch {}
           }
           await clearUserState(env, uid);
           await tgSendMessage(env, chat_id, 'پاسخ ارسال شد.');
+          return;
+        }
+        // User: ثبت تیکت
+        if (state?.step === 'ticket_wait') {
+          const content = (text || '').trim();
+          if (!content) { await tgSendMessage(env, chat_id, 'متن تیکت نامعتبر است.'); return; }
+          const t = await createTicket(env, uid, content, 'general');
+          if (t) {
+            await tgSendMessage(env, chat_id, `🎟 تیکت شما با شناسه ${t.id} ثبت شد. پشتیبانی به‌زودی پاسخ خواهد داد.`);
+            // notify admins
+            try {
+              const admins = getAdminChatIds(env);
+              for (const aid of admins) {
+                await tgSendMessage(env, aid, `🎟 تیکت جدید #${t.id}\nاز: <code>${uid}</code>\nمتن: ${htmlEscape(content)}`);
+              }
+            } catch {}
+          } else {
+            await tgSendMessage(env, chat_id, 'خطا در ثبت تیکت.');
+          }
+          await clearUserState(env, uid);
+          return;
+        }
+        // Admin: ایجاد کد هدیه — مرحله 1: مبلغ
+        if (state?.step === 'adm_gift_create_amount') {
+          if (!isAdminUser(env, uid)) { await clearUserState(env, uid); return; }
+          const amount = Number((text||'').replace(/[^0-9]/g,''));
+          if (!amount || amount <= 0) { await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است. یک عدد مثبت بفرستید.'); return; }
+          await setUserState(env, uid, { step: 'adm_gift_create_uses', amount });
+          await tgSendMessage(env, chat_id, 'حداکثر تعداد دفعات استفاده از کد را ارسال کنید (عدد > 0):');
+          return;
+        }
+        // Admin: ایجاد کد هدیه — مرحله 2: سقف استفاده و ساخت کد
+        if (state?.step === 'adm_gift_create_uses' && typeof state.amount === 'number') {
+          if (!isAdminUser(env, uid)) { await clearUserState(env, uid); return; }
+          const uses = Number((text||'').replace(/[^0-9]/g,''));
+          if (!uses || uses <= 0) { await tgSendMessage(env, chat_id, 'تعداد نامعتبر است.'); return; }
+          // generate unique code
+          let code = '';
+          for (let i=0;i<5;i++) {
+            code = newToken(8);
+            const exists = await kvGet(env, CONFIG.GIFT_PREFIX + code);
+            if (!exists) break;
+          }
+          const gift = { code, amount: state.amount, max_uses: uses, used_by: [], created_at: nowTs() };
+          await kvSet(env, CONFIG.GIFT_PREFIX + code, gift);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `🎁 کد هدیه ساخته شد:\nکد: <code>${code}</code>\nمبلغ: ${fmtNum(gift.amount)} ${CONFIG.DEFAULT_CURRENCY}\nسقف استفاده: ${uses} بار`);
+          return;
+        }
+        // User: وارد کردن کد هدیه
+        if (state?.step === 'gift_redeem_wait') {
+          const code = String((text||'').trim());
+          const g = await kvGet(env, CONFIG.GIFT_PREFIX + code);
+          if (!g) { await tgSendMessage(env, chat_id, 'کد هدیه نامعتبر است.'); return; }
+          const usedBy = Array.isArray(g.used_by) ? g.used_by : [];
+          if (usedBy.includes(uid)) { await tgSendMessage(env, chat_id, 'شما قبلاً از این کد استفاده کرده‌اید.'); return; }
+          const max = Number(g.max_uses || 0);
+          if (max > 0 && usedBy.length >= max) { await tgSendMessage(env, chat_id, 'سقف استفاده از این کد تکمیل شده است.'); return; }
+          const ok = await creditBalance(env, uid, Number(g.amount || 0));
+          if (!ok) { await tgSendMessage(env, chat_id, 'خطا در اعمال کد.'); return; }
+          usedBy.push(uid); g.used_by = usedBy;
+          await kvSet(env, CONFIG.GIFT_PREFIX + code, g);
+          await tgSendMessage(env, chat_id, `✅ کد هدیه اعمال شد. ${fmtNum(g.amount)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد.`);
+          await clearUserState(env, uid);
           return;
         }
         if (state?.step === 'adm_broadcast_wait') {
@@ -1381,6 +1443,18 @@ async function onCallback(cb, env) {
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
+    if (data === 'ticket_new') {
+      await setUserState(env, uid, { step: 'ticket_wait' });
+      await tgEditMessage(env, chat_id, mid, '📝 لطفاً متن تیکت خود را ارسال کنید. /update برای لغو', {});
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data === 'giftcode') {
+      await setUserState(env, uid, { step: 'gift_redeem_wait' });
+      await tgEditMessage(env, chat_id, mid, '🎁 لطفاً کد هدیه را ارسال کنید. /update برای لغو', {});
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
 
     if (data === 'myfiles' || data.startsWith('myfiles_p:')) {
         if (!isAdminUser(env, uid)) { await tgAnswerCallbackQuery(env, cb.id, 'این بخش مخصوص مدیر است'); return; }
@@ -1536,13 +1610,12 @@ async function onCallback(cb, env) {
       if (data === 'adm_buttons') {
         const s = await getSettings(env);
         const disabled = Array.isArray(s.disabled_buttons) ? s.disabled_buttons : [];
-        const known = getKnownCallbacks();
-        const rows = [];
-        for (const k of known) {
-          const isDis = disabled.includes(k);
-          const label = (isDis ? '🚫 ' : '🟢 ') + k;
-          rows.push([{ text: label, callback_data: 'adm_btn_toggle:'+k }]);
-        }
+        const known = getKnownUserButtons();
+        const rows = known.map(b => {
+          const isDis = disabled.includes(b.data);
+          const label = (isDis ? '🚫 ' : '🟢 ') + b.label;
+          return [{ text: label, callback_data: 'adm_btn_toggle:'+b.data }];
+        });
         rows.push([{ text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_service' }]);
         const txt = 'مدیریت دکمه‌های غیرفعال\nیکی را برای تغییر وضعیت انتخاب کنید:';
@@ -1559,13 +1632,12 @@ async function onCallback(cb, env) {
         await setSettings(env, s);
         // Refresh view
         const disabled = s.disabled_buttons;
-        const known = getKnownCallbacks();
-        const rows = [];
-        for (const k of known) {
-          const isDis = disabled.includes(k);
-          const label = (isDis ? '🚫 ' : '🟢 ') + k;
-          rows.push([{ text: label, callback_data: 'adm_btn_toggle:'+k }]);
-        }
+        const known = getKnownUserButtons();
+        const rows = known.map(b => {
+          const isDis = disabled.includes(b.data);
+          const label = (isDis ? '🚫 ' : '🟢 ') + b.label;
+          return [{ text: label, callback_data: 'adm_btn_toggle:'+b.data }];
+        });
         rows.push([{ text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_service' }]);
         await tgEditMessage(env, chat_id, mid, 'مدیریت دکمه‌های غیرفعال\nیکی را برای تغییر وضعیت انتخاب کنید:', kb(rows));
@@ -1577,9 +1649,8 @@ async function onCallback(cb, env) {
         s.disabled_buttons = [];
         await setSettings(env, s);
         // Refresh inline list
-        const known = getKnownCallbacks();
-        const rows = [];
-        for (const k of known) rows.push([{ text: '🟢 ' + k, callback_data: 'adm_btn_toggle:'+k }]);
+        const known = getKnownUserButtons();
+        const rows = known.map(b => ([{ text: '🟢 ' + b.label, callback_data: 'adm_btn_toggle:'+b.data }]));
         rows.push([{ text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_service' }]);
         await tgEditMessage(env, chat_id, mid, 'مدیریت دکمه‌های غیرفعال\nیکی را برای تغییر وضعیت انتخاب کنید:', kb(rows));
@@ -1683,6 +1754,7 @@ async function onCallback(cb, env) {
         ].join('\n');
         const rows = [
           [{ text: '✍️ پاسخ', callback_data: 'ticket_reply:'+t.id }, { text: t.closed ? '🔓 بازگشایی' : '🔒 بستن', callback_data: (t.closed?'ticket_reopen:':'ticket_close:')+t.id }],
+          [{ text: '🗑 حذف', callback_data: 'ticket_del:'+t.id }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_tickets' }]
         ];
         await tgEditMessage(env, chat_id, mid, txt, kb(rows));
@@ -1716,6 +1788,7 @@ async function onCallback(cb, env) {
         ].join('\n');
         const rows = [
           [{ text: '✍️ پاسخ', callback_data: 'ticket_reply:'+t.id }, { text: t.closed ? '🔓 بازگشایی' : '🔒 بستن', callback_data: (t.closed?'ticket_reopen:':'ticket_close:')+t.id }],
+          [{ text: '🗑 حذف', callback_data: 'ticket_del:'+t.id }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_tickets' }]
         ];
         await tgEditMessage(env, chat_id, mid, txt, kb(rows));
@@ -1745,7 +1818,11 @@ async function onCallback(cb, env) {
       }
       if (data === 'adm_gifts') {
         const items = await listGiftCodes(env, 10);
-        const rows = items.map(g => ([{ text: `${g.used_by?'✅ مصرف شده':'🎁'} ${g.code} — ${fmtNum(g.amount)}`, callback_data: 'gift_view:'+g.code }]));
+        const rows = items.map(g => {
+          const used = Array.isArray(g.used_by) ? g.used_by.length : 0;
+          const max = g.max_uses || 0;
+          return [{ text: `${g.used_by?'✅':''} 🎁 ${g.code} — ${fmtNum(g.amount)} — ${used}/${max||'∞'}`, callback_data: 'gift_view:'+g.code }];
+        });
         rows.push([{ text: '➕ ایجاد کد جدید', callback_data: 'gift_new' }]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
         await tgEditMessage(env, chat_id, mid, `🎁 کدهای هدیه اخیر (${items.length})`, kb(rows));
@@ -1754,7 +1831,7 @@ async function onCallback(cb, env) {
       }
       if (data === 'gift_new') {
         await setUserState(env, uid, { step: 'adm_gift_create_amount' });
-        await tgEditMessage(env, chat_id, mid, 'مبلغ کد هدیه را ارسال کنید (فقط رقم). /update برای لغو', {});
+        await tgEditMessage(env, chat_id, mid, 'مبلغ سکه برای هر بار استفاده را ارسال کنید (فقط رقم). سپس از شما تعداد دفعات استفاده پرسیده می‌شود.', {});
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -1765,8 +1842,7 @@ async function onCallback(cb, env) {
         const txt = [
           `کد: <code>${g.code}</code>`,
           `مبلغ: ${fmtNum(g.amount)} ${CONFIG.DEFAULT_CURRENCY}`,
-          `وضعیت: ${g.used_by ? 'مصرف شده' : 'استفاده نشده'}`,
-          g.used_by ? `استفاده توسط: <code>${g.used_by}</code>` : ''
+          `مصرف: ${(Array.isArray(g.used_by)?g.used_by.length:0)}/${g.max_uses || '∞'}`,
         ].filter(Boolean).join('\n');
         const rows = [
           [{ text: '🗑 حذف', callback_data: 'gift_del:'+g.code }],
