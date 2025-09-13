@@ -90,6 +90,7 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
   }
 }
 
+// ------------------ Get bot version (for display in main menu) ------------------ //
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
@@ -97,6 +98,7 @@ async function getBotVersion(env) {
   } catch { return '1.5'; }
 }
 
+// ------------------ Get bot version (for display in main menu) ------------------ //
 async function mainMenuHeader(env) {
   const v = await getBotVersion(env);
   return `منو اصلی:\nنسخه ربات: ${v}`;
@@ -529,8 +531,13 @@ async function handleRoot(request, env) {
 async function handleWebhook(request, env, ctx) {
   // فقط POST از تلگرام پذیرفته می‌شود
   if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  if (!env?.BOT_TOKEN) {
+    console.error('handleWebhook: BOT_TOKEN is not set');
+    return new Response('bot token missing', { status: 500 });
+  }
   let update = null;
-  try { update = await request.json(); } catch { return new Response('bad json', { status: 200 }); }
+  try { update = await request.json(); } catch (e) { console.error('handleWebhook: bad json', e); return new Response('bad json', { status: 200 }); }
+  try { console.log('webhook update:', JSON.stringify(update)); } catch {}
 
   ctx.waitUntil(processUpdate(update, env));
   // پاسخ سریع به تلگرام
@@ -607,6 +614,7 @@ async function processUpdate(update, env) {
   try {
     // آمار پایه
     await bumpStat(env, 'updates');
+    try { console.log('processUpdate dispatch: keys=', Object.keys(update || {})); } catch {}
 
     if (update.message) {
       return await onMessage(update.message, env);
@@ -614,6 +622,7 @@ async function processUpdate(update, env) {
     if (update.callback_query) {
       return await onCallback(update.callback_query, env);
     }
+    try { console.log('processUpdate: no handler path'); } catch {}
   } catch (e) {
     console.error('processUpdate error', e, safeJson(update));
   }
