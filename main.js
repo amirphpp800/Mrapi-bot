@@ -1,16 +1,47 @@
 /*
-Cloudflare Worker — Telegram Bot (Enhanced)
+Cloudflare Worker — Telegram WireGuard Bot (Enhanced)
+
+Features:
+- Telegram webhook handler
+- Workers KV for persistence (binding name: BOT_KV)
+- Optional join-to-use check (JOIN_CHAT)
+- Upload: user sends a document -> stored metadata in KV -> returns private link /f/<token>
+- Download: /f/<token>?uid=<telegram_id>&ref=<referrer_id>
+- Enhanced admin panel with authentication, real-time stats, and file management
+- Service toggle, file disable/enable, cost management
+- Beautiful glassmorphism design with Persian support
+
+Bindings required when deploying:
+- KV namespace binding named BOT_KV
+
+Sections (edit guide):
+1) Config & Runtime
+2) KV helpers
+3) Telegram helpers (API wrappers, multipart upload)
+4) Utility (time, formatting)
+5) Settings & Date helpers
+6) Session helpers
+7) Inline UI helpers (links, dynamic menus)
+8) HTTP entrypoints (fetch, routes)
+9) Telegram webhook handling (updates, callbacks)
+10) Features & flows:
+   - Main menu, Profile & Account
+   - Tickets, Balance Transfer
+   - Missions, Lottery
+   - File management, Gifts
+   - Admin panel & Settings (Disable Buttons)
+   - Backup (export)
+11) Storage helpers (tickets, missions, lottery, files, users)
+12) Public endpoints (backup, file download)
 */
 
-import ranges from './ranges.js';
 import { handleWireguardCallback, handleWireguardMyConfig } from './wg.js';
 
 /* ==================== 1) Config & Runtime (EDIT HERE) ==================== */
 // IMPORTANT: Set secrets in environment variables for production. The values
 // below are fallbacks to help local testing. Prefer configuring via `env`.
 // EDIT: TELEGRAM_TOKEN, ADMIN_IDS, ADMIN_KEY, WEBHOOK_URL, JOIN_CHAT
-const TELEGRAM_TOKEN = "7591077984:AAGIkAtFPz8Qp7vBBSDVOozNC5zZvZFQlKU";
-
+const TELEGRAM_TOKEN = "";
 const ADMIN_IDS = []; // provide via env `ADMIN_IDS` (comma-separated)
 const ADMIN_KEY = ""; // provide via env `ADMIN_KEY`
 const WEBHOOK_URL = ""; // provide via env `WEBHOOK_URL`
@@ -28,7 +59,7 @@ let RUNTIME = {
 
 // Main admin and payments config (EDIT: customize display name and packages)
 const MAIN_ADMIN_ID = (Array.isArray(ADMIN_IDS) && ADMIN_IDS.length ? ADMIN_IDS : [])[0];
-const MAIN_ADMIN_USERNAME = 'minimalcraft'; // for display only
+const MAIN_ADMIN_USERNAME = 'NeoDebug'; // for display only
 // EDIT: Payment packages (diamonds and prices)
 const DIAMOND_PACKAGES = [
   { id: 'd10', diamonds: 10, price_toman: 15000 },
@@ -36,87 +67,194 @@ const DIAMOND_PACKAGES = [
   { id: 'd25', diamonds: 25, price_toman: 35000 },
   { id: 'd35', diamonds: 35, price_toman: 45000 }
 ];
-/* -------------------- Callback query handler (inline buttons) -------------------- */
-async function onCallback(cb, env) {
-  try {
-    const chatId = cb.message && cb.message.chat && cb.message.chat.id;
-    const uid = cb.from && cb.from.id;
-    const data = String(cb.data || '');
-    try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); } catch (_) {}
+// EDIT: Bank/card details for manual payments
+const BANK_CARD_NUMBER = '6219 8619 4308 4037';
+const BANK_CARD_NAME = 'امیرحسین سیاهبالائی';
 
-    if (!chatId || !uid) return;
-
-    // Simple router
-    if (data === 'MENU') {
-      await sendMainMenu(env, chatId, uid);
-      return;
-    }
-    if (data === 'CHECK_JOIN') {
-      const joined = await isUserJoinedAllRequiredChannels(env, uid);
-      if (joined) {
-        await sendMainMenu(env, chatId, uid);
-      } else {
-        await presentJoinPrompt(env, chatId);
-      }
-      return;
-    }
-    if (data === 'NOOP') {
-      return;
-    }
-
-    // My Files pagination/details minimal support
-    if (data.startsWith('MYFILES:')) {
-      const page = Number(data.split(':')[1] || '0') || 0;
-      try {
-        const view = await buildMyFilesKeyboard(env, uid, page);
-        await safeUpdateText(chatId, view.text, view.reply_markup, cb);
-      } catch (_) {
-        await tgApi('sendMessage', { chat_id: chatId, text: 'امکان نمایش فایل‌ها نیست.' });
-      }
-      return;
-    }
-
-    // Main menu buttons placeholders
-    if (data === 'SUB:ACCOUNT') {
-      const u = (await kvGetJson(env, `user:${uid}`)) || { id: uid };
-      const info = `👤 حساب کاربری\nآی‌دی: ${u.id}\nیوزرنیم: ${u.username || '-'}\n🪙 سکه: ${u.diamonds || 0}\nزیرمجموعه‌ها: ${u.referrals || 0}`;
-      await safeUpdateText(chatId, info, { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
-      return;
-    }
-    if (data === 'SUB:REFERRAL') {
-      const botUser = await getBotUsername(env);
-      const link = botUser ? `https://t.me/${botUser}?start=ref_${uid}` : 'نام کاربری ربات در دسترس نیست';
-      await safeUpdateText(chatId, `لینک دعوت شما:\n${link}`, { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
-      return;
-    }
-    if (data === 'GET_BY_TOKEN') {
-      await safeUpdateText(chatId, 'برای دریافت با توکن، دستور زیر را وارد کنید:\n/start d_<token>', { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
-      return;
-    }
-    if (data === 'REDEEM_GIFT') {
-      await safeUpdateText(chatId, 'کد هدیه خود را به صورت پیام ارسال کنید. (فعلاً پشتیبانی آزمایشی)', { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
-      return;
-    }
-    if (data === 'BUY_DIAMONDS') {
-      const text = `برای خرید سکه با کارت بانکی:\nشماره کارت: ${BANK_CARD_NUMBER}\nبه نام: ${BANK_CARD_NAME}\n\nپس از پرداخت، رسید را برای مدیر ارسال کنید.`;
-      await safeUpdateText(chatId, text, { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
-      return;
-    }
-    if (data === 'ADMIN:PANEL') {
-      if (isAdmin(uid)) {
-        const kb = buildAdminPanelKeyboard();
-        await safeUpdateText(chatId, 'پنل مدیریت (حداقلی):', kb, cb);
-      } else {
-        await tgApi('sendMessage', { chat_id: chatId, text: 'دسترسی مدیر ندارید.' });
-      }
-      return;
-    }
-
-    // Unknown button fallback
-    await tgApi('sendMessage', { chat_id: chatId, text: 'این دکمه پشتیبانی نمی‌شود.' });
-  } catch (_) {}
+function getDiamondPackageById(id) {
+  return DIAMOND_PACKAGES.find(p => p.id === id) || DIAMOND_PACKAGES[0];
 }
-/* -------------------- New Admin Page (Tabbed UI) -------------------- */
+
+const TELEGRAM_API = (token) => `https://api.telegram.org/bot${token}`;
+const TELEGRAM_FILE_API = (token) => `https://api.telegram.org/file/bot${token}`;
+
+// dynamic admins cache (refreshed per webhook)
+let DYNAMIC_ADMIN_IDS = [];
+
+/* ==================== 8) HTTP Entrypoint (router) ==================== */
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // Populate runtime config from env for this request
+    try {
+      populateRuntimeFromEnv(env);
+    } catch (_) {}
+
+    // Telegram webhook (POST to any path except /api/*) — ack immediately, process in background when possible
+    if (request.method === 'POST' && !url.pathname.startsWith('/api/')) {
+      // Secret validation disabled per user request
+      try {
+        if (ctx && request.clone) {
+          // ensure webhook stays correct and process update without delaying ack
+          ctx.waitUntil(ensureWebhookForRequest(env, request));
+          ctx.waitUntil(handleTelegramWebhook(request.clone(), env));
+          return new Response('ok');
+        }
+      } catch (_) {}
+      // Fallback inline processing if background not available
+      try { await handleTelegramWebhook(request, env); } catch (_) {}
+      return new Response('ok');
+    }
+
+    // Enhanced main page with admin panel (GET only)
+  if (url.pathname === '/' && request.method === 'GET') {
+      return handleMainPage(request, env, url, ctx);
+    }
+    // Map /admin to the backup-style admin page
+    if (url.pathname === '/admin' && request.method === 'GET') {
+      return handleAdminPage(request, env, url, ctx);
+    }
+
+    // Mini app public page (Top Referrers) — GET
+    if (url.pathname === '/miniapp' && request.method === 'GET') {
+      return handleMiniApp(env);
+    }
+
+    // File public link
+    if (url.pathname.startsWith('/f/')) return handleFileDownload(request, env, url);
+
+    // API endpoints for admin panel
+  if (url.pathname.startsWith('/api/')) return handleApiRequest(request, env, url, ctx);
+
+    // Health check
+    if (url.pathname === '/health') return new Response('ok');
+
+    // 404
+    return new Response('Not Found', { status: 404 });
+  }
+  ,
+  // Daily cron handler (configure a Cron Trigger in Cloudflare dashboard)
+  async scheduled(controller, env, ctx) {
+    const run = runDailyTasks(env);
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(run); else await run;
+  }
+};
+
+/* ==================== 2) KV helpers ==================== */
+async function kvGetJson(env, key) {
+  const v = await env.BOT_KV.get(key);
+  return v ? JSON.parse(v) : null;
+}
+async function kvPutJson(env, key, obj) {
+  return env.BOT_KV.put(key, JSON.stringify(obj));
+}
+async function kvDelete(env, key) {
+  try { return await env.BOT_KV.delete(key); } catch (_) { return; }
+}
+
+/* ==================== 3) Telegram helpers ==================== */
+function populateRuntimeFromEnv(env) {
+  RUNTIME.tgToken = env?.TELEGRAM_TOKEN || TELEGRAM_TOKEN || '';
+  RUNTIME.webhookUrl = env?.WEBHOOK_URL || WEBHOOK_URL || '';
+  RUNTIME.webhookSecret = null; // secret disabled
+  RUNTIME.adminKey = env?.ADMIN_KEY || ADMIN_KEY || '';
+  RUNTIME.joinChat = env?.JOIN_CHAT || JOIN_CHAT || '';
+  const adminIdsStr = env?.ADMIN_IDS || '';
+  if (adminIdsStr && typeof adminIdsStr === 'string') {
+    const parsed = adminIdsStr.split(',').map(s => Number(s.trim())).filter(n => Number.isFinite(n));
+    if (parsed.length) RUNTIME.adminIds = parsed;
+  } else if (!RUNTIME.adminIds || !RUNTIME.adminIds.length) {
+    RUNTIME.adminIds = (Array.isArray(ADMIN_IDS) ? ADMIN_IDS : []).map(Number).filter(Number.isFinite);
+  }
+}
+
+function requireTelegramToken() {
+  const token = RUNTIME.tgToken || TELEGRAM_TOKEN;
+  if (!token) throw new Error('TELEGRAM_TOKEN is not configured');
+  return token;
+}
+
+async function tgApi(method, body) {
+  const token = requireTelegramToken();
+  return fetch(`${TELEGRAM_API(token)}/${method}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  }).then(r => r.json());
+}
+async function tgGet(path) {
+  const token = requireTelegramToken();
+  return fetch(`${TELEGRAM_API(token)}/${path}`).then(r => r.json());
+}
+
+// Upload helper for multipart/form-data requests (e.g., sendDocument with a file)
+async function tgUpload(method, formData) {
+  const token = requireTelegramToken();
+  return fetch(`${TELEGRAM_API(token)}/${method}`, {
+    method: 'POST',
+    body: formData
+  }).then(r => r.json());
+}
+
+// Edit-in-place helper to reduce chat clutter (handles media; falls back to send on failure)
+async function safeUpdateText(chatId, text, reply_markup, cb, parse_mode) {
+  try {
+    if (cb && cb.message && cb.message.message_id) {
+      const isMedia = Boolean(cb.message.photo || cb.message.video || cb.message.document || cb.message.animation);
+      const method = isMedia ? 'editMessageCaption' : 'editMessageText';
+      const payload = {
+        chat_id: chatId,
+        message_id: cb.message.message_id,
+        reply_markup
+      };
+      if (parse_mode) payload.parse_mode = parse_mode;
+      if (isMedia) payload.caption = text; else payload.text = text;
+      const res = await tgApi(method, payload);
+      if (res && res.ok) return res;
+    }
+  } catch (_) {
+    // ignore and fall back to send
+  }
+  return await tgApi('sendMessage', { chat_id: chatId, text, reply_markup, parse_mode });
+}
+
+// Bot info helpers
+async function getBotInfo(env) {
+  const token = RUNTIME.tgToken || TELEGRAM_TOKEN;
+  const cacheKey = `bot:me:${(token || '').slice(0, 12)}`;
+  let info = await kvGetJson(env, cacheKey);
+  if (!info) {
+    const res = await tgGet('getMe');
+    if (res && res.ok) {
+      info = res.result;
+      await kvPutJson(env, cacheKey, info);
+    }
+  }
+  return info || null;
+}
+async function getBotUsername(env) {
+  const info = await getBotInfo(env);
+  return info && info.username ? info.username : null;
+}
+
+// Telegram webhook helpers
+async function tgSetWebhook(url) {
+  try {
+    const token = requireTelegramToken();
+    const res = await fetch(`${TELEGRAM_API(token)}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `url=${encodeURIComponent(url)}`
+    });
+    return await res.json();
+  } catch (_) { return null; }
+}
+async function tgGetWebhookInfo() {
+  try {
+    return await tgGet('getWebhookInfo');
+  } catch (_) { return null; }
+}
+
+/* -------------------- Admin Page (backup-style UI) -------------------- */
 async function handleAdminPage(req, env, url, ctx) {
   const key = url.searchParams.get('key');
   const adminKey = (RUNTIME.adminKey || ADMIN_KEY || '').trim();
@@ -155,13 +293,11 @@ async function handleAdminPage(req, env, url, ctx) {
     }
   }
   const fileCount = files.length;
-  const updateMode = (await kvGetJson(env, 'bot:update_mode')) || false;
   const settings = await getSettings(env);
   const webhookInfo = await tgGetWebhookInfo();
   const desiredWebhook = (() => {
     const base = (RUNTIME.webhookUrl || WEBHOOK_URL || url.origin || '').trim();
     if (!base) return '';
-    // Ensure we display the exact endpoint Telegram should call
     return base.endsWith('/webhook') ? base : `${base}/webhook`;
   })();
 
@@ -169,11 +305,7 @@ async function handleAdminPage(req, env, url, ctx) {
     <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
     <title>پنل مدیریت</title>
     <style>
-      :root{
-        --bg:#0a0f1f; --bg2:#0d1326; --panel:#0f172a; --glass:rgba(255,255,255,.06);
-        --muted:#9aa7bd; --accent:#6ea8fe; --accent2:#22d3ee; --accent3:#a78bfa;
-        --ok:#22c55e; --bad:#ef4444; --border:rgba(255,255,255,.12)
-      }
+      :root{--bg:#0a0f1f; --bg2:#0d1326; --panel:#0f172a; --glass:rgba(255,255,255,.06); --muted:#9aa7bd; --accent:#6ea8fe; --accent2:#22d3ee; --accent3:#a78bfa; --ok:#22c55e; --bad:#ef4444; --border:rgba(255,255,255,.12)}
       *{box-sizing:border-box}
       body{margin:0;font-family:Segoe UI,Tahoma,Arial;background:linear-gradient(135deg,var(--bg),var(--bg2));color:#e5e7eb}
       .topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:space-between;padding:16px 20px;background:rgba(13,19,38,.65);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
@@ -274,7 +406,7 @@ async function handleAdminPage(req, env, url, ctx) {
       </section>
 
     </div>
-    <footer>ساخته‌شده با ❤️ — رابط کاربری جدید با پالت رنگی بهبود یافته</footer>
+    <footer>ساخته‌شده با ❤️ — رابط مدیریت سبک</footer>
     <script>
       const tabs=document.querySelectorAll('.tab');
       const sections={dash:'#tab-dash',users:'#tab-users',files:'#tab-files',settings:'#tab-settings',diag:'#tab-diag'};
@@ -287,264 +419,8 @@ async function handleAdminPage(req, env, url, ctx) {
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
-// EDIT: Bank/card details for manual payments
-const BANK_CARD_NUMBER = '6219 8619 4308 4037';
-const BANK_CARD_NAME = 'امیرحسین سیاهبالائی';
-
-function getDiamondPackageById(id) {
-  return DIAMOND_PACKAGES.find(p => p.id === id) || DIAMOND_PACKAGES[0];
-}
-
-const TELEGRAM_API = (token) => `https://api.telegram.org/bot${token}`;
-const TELEGRAM_FILE_API = (token) => `https://api.telegram.org/file/bot${token}`;
-
-// dynamic admins cache (refreshed per webhook)
-let DYNAMIC_ADMIN_IDS = [];
-
-/* ==================== 8) HTTP Entrypoint (router) ==================== */
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-
-    // Populate runtime config from env for this request
-    try {
-      populateRuntimeFromEnv(env);
-    } catch (_) {}
-
-    // Explicit Telegram webhook endpoint
-    if (url.pathname === '/webhook' && request.method === 'POST') {
-      try { await handleTelegramWebhook(request, env); } catch (_) {}
-      return new Response('ok');
-    }
-
-    // Back-compat: accept POST to any path except /api/* as webhook, process inline
-    if (request.method === 'POST' && !url.pathname.startsWith('/api/')) {
-      try { await handleTelegramWebhook(request, env); } catch (_) {}
-      return new Response('ok');
-    }
-
-    // Root page: Status only (no admin panel)
-    if (url.pathname === '/' && request.method === 'GET') {
-      // Gather lightweight status
-      const users = (await kvGetJson(env, 'index:users')) || [];
-      const enabled = (await kvGetJson(env, 'bot:enabled')) ?? true;
-      const lastWebhookAt = (await kvGetJson(env, 'bot:last_webhook')) || 0;
-      const connected = typeof lastWebhookAt === 'number' && (now() - lastWebhookAt) < 5 * 60 * 1000;
-      const settings = await getSettings(env);
-      const webhookInfo = await tgGetWebhookInfo();
-      const desiredWebhook = (() => {
-        const base = (RUNTIME.webhookUrl || WEBHOOK_URL || url.origin || '').trim();
-        if (!base) return '';
-        return base.endsWith('/webhook') ? base : `${base}/webhook`;
-      })();
-
-      const row = (k, v) => `<tr><td style="padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:right">${k}</td><td style="padding:10px;border-bottom:1px solid rgba(255,255,255,.08);text-align:left">${v}</td></tr>`;
-      const html = `<!doctype html><html lang="fa" dir="rtl"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-      <title>وضعیت ربات</title>
-      <body style="margin:0;font-family:Segoe UI,Tahoma,Arial;background:#0b1220;color:#e5e7eb;">
-        <div style="max-width:860px;margin:0 auto;padding:24px">
-          <h1 style="margin:0 0 12px 0">📊 وضعیت کلی ربات</h1>
-          <div style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:16px;overflow:hidden">
-            <table style="width:100%;border-collapse:collapse">
-              ${row('سرویس', enabled ? '<span style="color:#22c55e">فعال</span>' : '<span style="color:#ef4444">غیرفعال</span>')}
-              ${row('کاربران', users.length.toLocaleString('fa-IR'))}
-              ${row('آخرین وبهوک', lastWebhookAt ? new Date(lastWebhookAt).toLocaleString('fa-IR') : '-')}
-              ${row('اتصال وبهوک', connected ? '<span style="color:#22c55e">آنلاین</span>' : '<span style="color:#ef4444">آفلاین</span>')}
-              ${row('Webhook مطلوب', desiredWebhook ? `<code>${desiredWebhook}</code>` : '-')}
-              ${row('Webhook فعلی تلگرام', (webhookInfo&&webhookInfo.result&&webhookInfo.result.url) ? `<code>${webhookInfo.result.url}</code>` : '-')}
-              ${row('هزینه‌ها (DNS/WG/OVPN)', `${settings.cost_dns}/${settings.cost_wg}/${settings.cost_ovpn}`)}
-              ${row('توکن تلگرام', (RUNTIME.tgToken||'').length ? '✅' : '❌')}
-            </table>
-          </div>
-          <div style="opacity:.75;margin-top:10px;font-size:.9rem">Health: <a href="/health" style="color:#6ea8fe">/health</a> — MiniApp: <a href="/miniapp" style="color:#6ea8fe">/miniapp</a></div>
-        </div>
-      </body></html>`;
-      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-    }
-
-    // Mini app public page (Top Referrers) — GET
-    if (url.pathname === '/miniapp' && request.method === 'GET') {
-      return handleMiniApp(env);
-    }
-
-    // File public link
-    if (url.pathname.startsWith('/f/')) return handleFileDownload(request, env, url);
-
-    // Diagnostic: send a test message (temporary). Usage: /diag-send?key=ADMIN_KEY&uid=123&text=hi
-    if (url.pathname === '/diag-send' && request.method === 'GET') {
-      const key = url.searchParams.get('key') || '';
-      const adminKey = (RUNTIME.adminKey || ADMIN_KEY || '').trim();
-      if (!adminKey || key !== adminKey) {
-        return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
-      }
-      const uid = Number(url.searchParams.get('uid') || '');
-      const text = url.searchParams.get('text') || 'ping';
-      if (!Number.isFinite(uid) || uid <= 0) {
-        return new Response(JSON.stringify({ ok: false, error: 'bad uid' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-      }
-      const res = await tgApi('sendMessage', { chat_id: uid, text });
-      return new Response(JSON.stringify(res || { ok: false }), { headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // Health check
-    if (url.pathname === '/health') return new Response('ok');
-
-    // 404
-    return new Response('Not Found', { status: 404 });
-  },
-  // Daily cron handler (configure a Cron Trigger in Cloudflare dashboard)
-  async scheduled(controller, env, ctx) {
-    const run = runDailyTasks(env);
-    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(run); else await run;
-  }
-};
-
-/* ==================== 2) KV helpers ==================== */
-async function kvGetJson(env, key) {
-  try {
-    if (!env || !env.BOT_KV || typeof env.BOT_KV.get !== 'function') return null;
-    const v = await env.BOT_KV.get(key);
-    return v ? JSON.parse(v) : null;
-  } catch (_) {
-    return null;
-  }
-}
-async function kvPutJson(env, key, obj) {
-  try {
-    if (!env || !env.BOT_KV || typeof env.BOT_KV.put !== 'function') return;
-    return await env.BOT_KV.put(key, JSON.stringify(obj));
-  } catch (_) { return; }
-}
-async function kvDelete(env, key) {
-  try {
-    if (!env || !env.BOT_KV || typeof env.BOT_KV.delete !== 'function') return;
-    return await env.BOT_KV.delete(key);
-  } catch (_) { return; }
-}
-
-/* ==================== 3) Telegram helpers ==================== */
-function populateRuntimeFromEnv(env) {
-  // Use hardcoded token as requested; ignore env for TELEGRAM_TOKEN
-  RUNTIME.tgToken = (env?.TELEGRAM_TOKEN || TELEGRAM_TOKEN || '').trim();
-  RUNTIME.webhookUrl = env?.WEBHOOK_URL || WEBHOOK_URL || '';
-  RUNTIME.webhookSecret = null; // secret disabled
-  RUNTIME.adminKey = env?.ADMIN_KEY || ADMIN_KEY || '';
-  RUNTIME.joinChat = env?.JOIN_CHAT || JOIN_CHAT || '';
-  const adminIdsStr = env?.ADMIN_IDS || '';
-  if (adminIdsStr && typeof adminIdsStr === 'string') {
-    const parsed = adminIdsStr.split(',').map(s => Number(s.trim())).filter(n => Number.isFinite(n));
-    if (parsed.length) RUNTIME.adminIds = parsed;
-  } else if (!RUNTIME.adminIds || !RUNTIME.adminIds.length) {
-    RUNTIME.adminIds = (Array.isArray(ADMIN_IDS) ? ADMIN_IDS : []).map(Number).filter(Number.isFinite);
-  }
-}
-
-function requireTelegramToken() {
-  const token = RUNTIME.tgToken || TELEGRAM_TOKEN;
-  if (!token) throw new Error('TELEGRAM_TOKEN is not configured');
-  return token;
-}
-
-async function tgApi(method, body) {
-  try {
-    const token = requireTelegramToken();
-    return fetch(`${TELEGRAM_API(token)}/${method}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-    }).then(r => r.json());
-  } catch (_) {
-    // No token configured; avoid crashing the request path
-    return { ok: false, error: 'no_token' };
-  }
-}
-async function tgGet(path) {
-  try {
-    const token = requireTelegramToken();
-    return fetch(`${TELEGRAM_API(token)}/${path}`).then(r => r.json());
-  } catch (_) {
-    // No token configured
-    return null;
-  }
-}
-
-// Upload helper for multipart/form-data requests (e.g., sendDocument with a file)
-async function tgUpload(method, formData) {
-  try {
-    const token = requireTelegramToken();
-    return fetch(`${TELEGRAM_API(token)}/${method}`, {
-      method: 'POST',
-      body: formData
-    }).then(r => r.json());
-  } catch (_) {
-    return { ok: false, error: 'no_token' };
-  }
-}
-
-// Edit-in-place helper to reduce chat clutter (handles media; falls back to send on failure)
-async function safeUpdateText(chatId, text, reply_markup, cb, parse_mode) {
-  try {
-    if (cb && cb.message && cb.message.message_id) {
-      const isMedia = Boolean(cb.message.photo || cb.message.video || cb.message.document || cb.message.animation);
-      const method = isMedia ? 'editMessageCaption' : 'editMessageText';
-      const payload = {
-        chat_id: chatId,
-        message_id: cb.message.message_id,
-        reply_markup
-      };
-      if (parse_mode) payload.parse_mode = parse_mode;
-      if (isMedia) payload.caption = text; else payload.text = text;
-      const res = await tgApi(method, payload);
-      if (res && res.ok) return res;
-    }
-  } catch (_) {
-    // ignore and fall back to send
-  }
-  return await tgApi('sendMessage', { chat_id: chatId, text, reply_markup, parse_mode });
-}
-
-// Bot info helpers
-async function getBotInfo(env) {
-  const token = RUNTIME.tgToken || TELEGRAM_TOKEN;
-  const cacheKey = `bot:me:${(token || '').slice(0, 12)}`;
-  let info = await kvGetJson(env, cacheKey);
-  if (!info) {
-    const res = await tgGet('getMe');
-    if (res && res.ok) {
-      info = res.result;
-      await kvPutJson(env, cacheKey, info);
-    }
-  }
-  return info || null;
-}
-async function getBotUsername(env) {
-  const info = await getBotInfo(env);
-  return info && info.username ? info.username : null;
-}
-
-// Telegram webhook helpers
-async function tgSetWebhook(url) {
-  try {
-    const token = requireTelegramToken();
-    const res = await fetch(`${TELEGRAM_API(token)}/setWebhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `url=${encodeURIComponent(url)}`
-    });
-    return await res.json();
-  } catch (_) { return null; }
-}
-async function tgGetWebhookInfo() {
-  try {
-    return await tgGet('getWebhookInfo');
-  } catch (_) { return null; }
-}
-async function tgDeleteWebhook() {
-  try {
-    return await tgGet('deleteWebhook');
-  } catch (_) { return null; }
-}
-
 /* ==================== 4) Utility ==================== */
-function makeToken(len = 10) {
+function makeToken(len = 20) {
   const bytes = crypto.getRandomValues(new Uint8Array(len));
   return btoa(String.fromCharCode(...bytes)).replace(/[+/=]/g, '').slice(0, len);
 }
@@ -576,10 +452,11 @@ function formatFileSize(bytes) {
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 // ===== Private Server / DNS helpers =====
-// Always source ranges from the local range.json file
+// Default ranges moved to external file `dns_ranges.json` for easier maintenance
+import dnsRanges from './dns_ranges.json' assert { type: 'json' };
+import { OVPN_TEMPLATE } from './ovpn_template.js';
 async function getDnsCidrConfig(env) {
-  // Ignore KV and any other sources; strictly use range.json
-  return ranges || {};
+  return (await kvGetJson(env, 'ps:dns:cidr')) || dnsRanges;
 }
 function randomIntInclusive(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -668,8 +545,6 @@ async function generateDnsAddresses(env, countryCode) {
   const c = cfg[countryCode];
   if (!c) throw new Error('country_not_supported');
   const pick = (arr) => arr[randomIntInclusive(0, arr.length - 1)];
-  if (!Array.isArray(c.v4) || c.v4.length === 0) throw new Error('no_ipv4_ranges');
-  if (!Array.isArray(c.v6) || c.v6.length === 0) throw new Error('no_ipv6_ranges');
   const v4cidr = pick(c.v4);
   const v6cidrA = pick(c.v6);
   const v6cidrB = pick(c.v6);
@@ -680,12 +555,38 @@ async function generateDnsAddresses(env, countryCode) {
   return { ip4, ip6a, ip6b };
 }
 function dnsCountryLabel(code) {
+  if (code === 'ES') return 'اسپانیا';
   if (code === 'DE') return 'آلمان';
+  if (code === 'FR') return 'فرانسه';
+  if (code === 'SE') return 'سوئد';
+  if (code === 'TR') return 'ترکیه';
+  if (code === 'PH') return 'فیلیپین';
+  if (code === 'JP') return 'ژاپن';
+  if (code === 'NL') return 'هلند';
+  if (code === 'DK') return 'دانمارک';
+  if (code === 'BE') return 'بلژیک';
+  if (code === 'CH') return 'سوئیس';
+  if (code === 'CN') return 'چین';
+  if (code === 'TW') return 'تایوان';
+  if (code === 'IE') return 'ایرلند';
   return code;
 }
 function countryFlag(code) {
+  if (code === 'ES') return '🇪🇸';
   if (code === 'DE') return '🇩🇪';
-  return code;
+  if (code === 'FR') return '🇫🇷';
+  if (code === 'SE') return '🇸🇪';
+  if (code === 'TR') return '🇹🇷';
+  if (code === 'PH') return '🇵🇭';
+  if (code === 'JP') return '🇯🇵';
+  if (code === 'NL') return '🇳🇱';
+  if (code === 'DK') return '🇩🇰';
+  if (code === 'BE') return '🇧🇪';
+  if (code === 'CH') return '🇨🇭';
+  if (code === 'CN') return '🇨🇳';
+  if (code === 'TW') return '🇹🇼';
+  if (code === 'IE') return '🇮🇪';
+  return '';
 }
 function base64UrlToBase64(u) {
   const s = u.replace(/-/g, '+').replace(/_/g, '/');
@@ -778,7 +679,7 @@ async function getFileTakers(env, token, limit = 50) {
 /* -------------------- Security helpers -------------------- */
 function isValidTokenFormat(token) {
   if (!token || typeof token !== 'string') return false;
-  if (token.length < 8 || token.length > 64) return false;
+  if (token.length < 10 || token.length > 64) return false;
   return /^[A-Za-z0-9_-]+$/.test(token);
 }
 async function checkRateLimit(env, uid, action, maxOps, windowMs) {
@@ -818,26 +719,47 @@ async function getShareLink(env, token) {
 }
 async function buildDynamicMainMenu(env, uid) {
   const isAdminUser = isAdmin(uid);
+  const settings = await getSettings(env);
+
+  // Build rows explicitly per requested order
   const rows = [];
 
-  // Row 1: Referral | Account
+  // Row 1: Buy Panel (moved to top per request)
+  rows.push([
+    { text: '🛒 خرید پنل', callback_data: 'PANEL_BUY' }
+  ]);
+
+  // Row 2: Referral (renamed) side-by-side with User Account
   rows.push([
     { text: '👥 زیرمجموعه گیری', callback_data: 'SUB:REFERRAL' },
     { text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }
   ]);
 
-  // Row 2: Gift Code | Get by Token
+  // Row 3: Gift Code | Get by Token
   rows.push([
-    { text: '🎁 کد هدیه', callback_data: 'REDEEM_GIFT' },
-    { text: '🔑 دریافت با توکن', callback_data: 'GET_BY_TOKEN' }
+    { text: labelFor(settings.button_labels, 'gift', '🎁 کد هدیه'), callback_data: 'REDEEM_GIFT' },
+    { text: labelFor(settings.button_labels, 'get_by_token', '🔑 دریافت با توکن'), callback_data: 'GET_BY_TOKEN' }
+  ]);
+  // Replace Support row with Private Server in main menu
+  rows.push([
+    { text: '🛡️ سرور اختصاصی', callback_data: 'PRIVATE_SERVER' }
   ]);
 
-  // Row 3: Buy Coins
-  rows.push([{ text: '💳 خرید سکه', callback_data: 'BUY_DIAMONDS' }]);
+  // (Support removed per request)
 
-  // Row 4 (admin only): Admin Panel and My Files
+  // Row 4: Lottery side-by-side with Missions
+  rows.push([
+    { text: labelFor(settings.button_labels, 'lottery', '🎟 قرعه‌کشی'), callback_data: 'LOTTERY' },
+    { text: labelFor(settings.button_labels, 'missions', '📆 مأموریت‌ها'), callback_data: 'MISSIONS' }
+  ]);
+
+  // (Private Server row already added above as replacement for Support)
+
+  // Row 5: Buy Diamonds (single)
+  rows.push([{ text: labelFor(settings.button_labels, 'buy_points', '💳 خرید سکه'), callback_data: 'BUY_DIAMONDS' }]);
+
+  // Row 6 (bottom): Admin Panel (only for admins)
   if (isAdminUser) {
-    rows.push([{ text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' }]);
     rows.push([{ text: '🛠 پنل مدیریت', callback_data: 'ADMIN:PANEL' }]);
   }
 
@@ -858,13 +780,11 @@ function buildAdminPanelKeyboard() {
     { text: '⚙️ تنظیمات سرویس', callback_data: 'ADMIN:SETTINGS' }
   ]);
   rows.push([
-    { text: '🧑‍💼 جزئیات کاربر', callback_data: 'ADMIN:USER_DETAILS' }
-  ]);
-  rows.push([
     { text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' },
     { text: '📤 آپلود فایل', callback_data: 'ADMIN:UPLOAD' }
   ]);
   rows.push([
+    { text: '📤 آپلود گروهی', callback_data: 'ADMIN:BULK_UPLOAD' },
     { text: '📣 کانال‌های اجباری', callback_data: 'ADMIN:MANAGE_JOIN' }
   ]);
   rows.push([
@@ -873,7 +793,8 @@ function buildAdminPanelKeyboard() {
   ]);
   rows.push([
     { text: '🎯 افزودن سکه', callback_data: 'ADMIN:GIVEPOINTS' },
-    { text: '➖ کسر سکه', callback_data: 'ADMIN:TAKEPOINTS' }
+    { text: '➖ کسر سکه', callback_data: 'ADMIN:TAKEPOINTS' },
+    { text: '📆 ماموریت‌ها', callback_data: 'ADMIN:MISSIONS' }
   ]);
   rows.push([
     { text: '❄️ فریز موجودی', callback_data: 'ADMIN:FREEZE' },
@@ -881,6 +802,9 @@ function buildAdminPanelKeyboard() {
   ]);
   rows.push([
     { text: '🗄 تهیه پشتیبان', callback_data: 'ADMIN:BACKUP' },
+    { text: '🎟 قرعه‌کشی', callback_data: 'ADMIN:LOTTERY' }
+  ]);
+  rows.push([
     { text: '💳 مدیریت پرداخت‌ها', callback_data: 'ADMIN:PAYMENTS' }
   ]);
   rows.push([
@@ -997,26 +921,15 @@ async function buildMyFilesKeyboard(env, uid, page = 0, pageSize = 5) {
     : 'هنوز فایلی ندارید.';
   return { text, reply_markup: { inline_keyboard: rows } };
 }
-async function sendMainMenu(env, chatId, uid, opts = {}) {
-  const skipJoin = !!opts.skipJoin;
+async function sendMainMenu(env, chatId, uid) {
   try {
-    if (!skipJoin) {
-      const requireJoin = await getRequiredChannels(env);
-      if (requireJoin.length && !isAdmin(uid)) {
-        const joined = await isUserJoinedAllRequiredChannels(env, uid);
-        if (!joined) { await presentJoinPrompt(env, chatId); return; }
-      }
+    const requireJoin = await getRequiredChannels(env);
+    if (requireJoin.length && !isAdmin(uid)) {
+      const joined = await isUserJoinedAllRequiredChannels(env, uid);
+      if (!joined) { await presentJoinPrompt(env, chatId); return; }
     }
   } catch (_) {}
-  const kb = await buildDynamicMainMenu(env, uid);
-  try {
-    const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: kb });
-    if (!res || !res.ok) {
-      await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ خطا در ارسال منو: ${res && (res.description || res.error) || 'unknown'}` });
-    }
-  } catch (e) {
-    await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ استثنا هنگام ارسال منو: ${String(e && e.message || e)}` });
-  }
+  await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: await buildDynamicMainMenu(env, uid) });
 }
 
 /* ==================== 9) Telegram webhook handling ==================== */
@@ -1041,6 +954,7 @@ async function onMessage(msg, env) {
   const chatId = msg.chat.id;
   const from = msg.from || {};
   const uid = from.id;
+
   // Ignore non-private chats: the bot should not speak in groups; used only to check membership
   try {
     const chatType = msg.chat && msg.chat.type;
@@ -1081,65 +995,17 @@ async function onMessage(msg, env) {
   }
 
   const text = (msg.text || '').trim();
-  // 1) Handle /start FIRST (as on.js), so the first response is immediate
-  if (text.startsWith('/start')) {
-    // Respect update mode like on.js
-    try {
-      const updateMode = (await kvGetJson(env, 'bot:update_mode')) || false;
-      if (updateMode && !isAdmin(uid)) {
-        await tgApi('sendMessage', { chat_id: chatId, text: '🔧 ربات در حال بروزرسانی است. لطفاً دقایقی دیگر مجدداً تلاش کنید.' });
-        return;
-      }
-    } catch (_) {}
-
-    // Reset session on /start as in on.js
-    try { await setSession(env, uid, {}); } catch (_) {}
-
-    const parts = text.split(/\s+/);
-    const payload = parts[1] || '';
-    // Support '/start d_<token>' deep-links to deliver content inside bot
-    if (payload && payload.startsWith('d_')) {
-      const token = payload.slice(2).trim();
-      if (token) { await handleBotDownload(env, uid, chatId, token, null); return; }
-    }
-    // Support referral-only deep links: /start <refId>
-    if (payload && !payload.startsWith('d_')) {
-      const refIdNum = Number(payload);
-      if (Number.isFinite(refIdNum) && refIdNum > 0 && refIdNum !== Number(uid)) {
-        try {
-          const currentUser = (await kvGetJson(env, `user:${uid}`)) || { id: uid };
-          if (!currentUser.referred_by) {
-            currentUser.referred_by = refIdNum;
-            await kvPutJson(env, `user:${uid}`, currentUser);
-          }
-        } catch (_) {}
-      }
-    }
-    // Default: show main menu (skip join check on first start for immediate UX)
-    await sendMainMenu(env, chatId, uid, { skipJoin: true });
-    return;
-  }
-
-  // 2) Enforce join to required channels for non-admins on all other commands
-  try {
-    const requireJoin = await getRequiredChannels(env);
-    if (requireJoin.length && !isAdmin(uid)) {
-      const joinedAll = await isUserJoinedAllRequiredChannels(env, uid);
-      if (!joinedAll) { await presentJoinPrompt(env, chatId); return; }
-    }
-  } catch (_) {}
-
-  // 3) Text-based fallbacks for reply keyboard buttons (in case inline keyboards fail)
-  if (text === '🏠 منو') { await sendMainMenu(env, chatId, uid); return; }
-  if (text === '👤 حساب کاربری') { await sendMainMenu(env, chatId, uid); return; }
-  // If no text present (e.g., some clients), still show menu
-  if (!text) { await sendMainMenu(env, chatId, uid); return; }
   // /update: simulate updating flow then show menu
   if (text === '/update') {
     await tgApi('sendMessage', { chat_id: chatId, text: 'در حال بروزرسانی به آخرین نسخه…' });
     await sleep(6500);
     await tgApi('sendMessage', { chat_id: chatId, text: 'بروزرسانی انجام شد ✅' });
-    // پس از آپدیت، عضویت اجباری را بررسی کن؛ در صورت عدم عضویت فقط پیام جوین نشان داده شود
+    // Enforce join before showing menu
+    const requireJoin0 = await getRequiredChannels(env);
+    if (requireJoin0.length && !isAdmin(uid)) {
+      const joinedAll0 = await isUserJoinedAllRequiredChannels(env, uid);
+      if (!joinedAll0) { await presentJoinPrompt(env, chatId); return; }
+    }
     await sendMainMenu(env, chatId, uid);
     return;
   }
@@ -1165,11 +1031,11 @@ async function onMessage(msg, env) {
       await tgApi('sendMessage', { chat_id: chatId, text: `کاربر ${targetId} یافت نشد.` });
       return;
     }
-    const info = `👤 اطلاعات کاربر
+    const info = `👤 پروفایل کاربر
 آی‌دی: ${u.id}
 یوزرنیم: ${u.username || '-'}
 نام: ${u.first_name || '-'}
-🪙 سکه: ${u.diamonds || 0}${u.frozen ? ' (فریز)' : ''}
+سکه: ${u.diamonds || 0}${u.frozen ? ' (فریز)' : ''}
 زیرمجموعه‌ها: ${u.referrals || 0}
 تاریخ عضویت: ${u.created_at ? formatDate(u.created_at) : '-'}
 آخرین فعالیت: ${u.last_seen ? formatDate(u.last_seen) : '-'}
@@ -1409,9 +1275,18 @@ async function onMessage(msg, env) {
       return;
     }
     // Bulk upload: append tokens on each successful upload
-    if (session.awaiting === 'bulk_upload' || session.awaiting === 'bulk_meta') {
-      await setSession(env, uid, {});
-      await tgApi('sendMessage', { chat_id: chatId, text: 'اپلود گروهی غیرفعال شده است.' });
+    if (session.awaiting === 'bulk_upload') {
+      if (!isAdmin(uid)) { await tgApi('sendMessage', { chat_id: chatId, text: 'فقط ادمین‌ها.' }); return; }
+      const created = await handleAnyUpload(msg, env, { ownerId: uid });
+      if (created) {
+        const sess2 = await getSession(env, uid);
+        const arr = Array.isArray(sess2.tokens) ? sess2.tokens : [];
+        arr.push(created.token);
+        await setSession(env, uid, { awaiting: 'bulk_upload', tokens: arr });
+        await tgApi('sendMessage', { chat_id: chatId, text: `✅ افزوده شد (${arr.length}): ${created.token}` });
+      } else {
+        await tgApi('sendMessage', { chat_id: chatId, text: 'نوع محتوا پشتیبانی نمی‌شود.' });
+      }
       return;
     }
 
@@ -1427,9 +1302,27 @@ async function onMessage(msg, env) {
       await tgApi('sendMessage', { chat_id: chatId, text: `✅ محتوا جایگزین شد برای توکن ${token}` });
       return;
     }
+    // Support flow: forward next message to main admin
     if (session.awaiting === 'support_wait') {
-      await setSession(env, uid, {});
-      await tgApi('sendMessage', { chat_id: chatId, text: 'لطفاً از پشتیبانی استفاده کنید: https://t.me/NeoDebug' });
+      const header = `📨 پیام پشتیبانی از کاربر ${uid}${from.username ? ` (@${from.username})` : ''}`;
+      let forwarded = false;
+      if (msg.text) {
+        await tgApi('sendMessage', { chat_id: MAIN_ADMIN_ID, text: `${header}\n\n${msg.text}`, reply_markup: { inline_keyboard: [[{ text: '✉️ پاسخ', callback_data: `SUPREPLY:${uid}` }]] } });
+        forwarded = true;
+      } else if (msg.photo && msg.photo.length) {
+        const p = msg.photo[msg.photo.length - 1];
+        await tgApi('sendPhoto', { chat_id: MAIN_ADMIN_ID, photo: p.file_id, caption: header, reply_markup: { inline_keyboard: [[{ text: '✉️ پاسخ', callback_data: `SUPREPLY:${uid}` }]] } });
+        forwarded = true;
+      } else if (msg.document) {
+        await tgApi('sendDocument', { chat_id: MAIN_ADMIN_ID, document: msg.document.file_id, caption: header, reply_markup: { inline_keyboard: [[{ text: '✉️ پاسخ', callback_data: `SUPREPLY:${uid}` }]] } });
+        forwarded = true;
+      }
+      if (forwarded) {
+        await setSession(env, uid, {});
+        await tgApi('sendMessage', { chat_id: chatId, text: '✅ پیام شما به پشتیبانی ارسال شد. پاسخ از طریق همین ربات اطلاع‌رسانی می‌شود.' });
+        return;
+      }
+      await tgApi('sendMessage', { chat_id: chatId, text: 'لطفاً متن یا تصویر پیام خود را ارسال کنید.' });
       return;
     }
 
@@ -1459,46 +1352,6 @@ async function onMessage(msg, env) {
       purchase.updated_at = now();
       await kvPutJson(env, pKey, purchase);
       await setSession(env, uid, {});
-
-      // Build admin review message and actions depending on purchase type
-      const isPanelPurchase = purchase.type === 'panel';
-      const caption = isPanelPurchase
-        ? `درخواست خرید پنل\nشناسه: ${purchase.id}\nکاربر: ${uid}${from.username ? ` (@${from.username})` : ''}\nپنل: ${purchase.panel_title || '-'}\nمبلغ: ${purchase.price_toman.toLocaleString('fa-IR')} تومان`
-        : `درخواست خرید سکه\nشناسه: ${purchase.id}\nکاربر: ${uid}${from.username ? ` (@${from.username})` : ''}\nسکه: ${purchase.diamonds}\nمبلغ: ${purchase.price_toman.toLocaleString('fa-IR')} تومان`;
-      const kb = isPanelPurchase
-        ? { inline_keyboard: [[
-            { text: '✉️ رفتن به پیوی کاربر', url: `tg://user?id=${uid}` },
-            { text: '❌ رد', callback_data: `PAYREJ:${purchase.id}` }
-          ]] }
-        : { inline_keyboard: [[
-            { text: '✅ تایید و افزودن سکه', callback_data: `PAYAPP:${purchase.id}` },
-            { text: '❌ رد', callback_data: `PAYREJ:${purchase.id}` }
-          ]] };
-      try {
-        const admins = await getAdminIds(env);
-        let recipients = [];
-        if (Array.isArray(admins) && admins.length) {
-          recipients = admins;
-        } else if (MAIN_ADMIN_ID) {
-          recipients = [Number(MAIN_ADMIN_ID)];
-        } else if (RUNTIME.adminIds && RUNTIME.adminIds.length) {
-          recipients = RUNTIME.adminIds.map(Number);
-        }
-        if (!recipients.length) {
-          await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ مدیر پیکربندی نشده است. رسید ذخیره شد و پس از تنظیم مدیر بررسی می‌شود.' });
-        } else {
-          for (const aid of recipients) {
-            try {
-              if (isPhoto) {
-                await tgApi('sendPhoto', { chat_id: aid, photo: fileId, caption, reply_markup: kb });
-              } else {
-                await tgApi('sendDocument', { chat_id: aid, document: fileId, caption, reply_markup: kb });
-              }
-            } catch (_) {}
-          }
-        }
-      } catch (_) {}
-      await tgApi('sendMessage', { chat_id: chatId, text: `✅ رسید دریافت شد.\nشناسه خرید: ${purchase.id}\nنتیجه بررسی به شما اعلام می‌شود.` });
       return;
     }
     if (session.awaiting === 'broadcast' && isAdmin(uid) && text) {
@@ -1534,7 +1387,6 @@ async function onMessage(msg, env) {
       await setSession(env, uid, {});
       if (!isValidTokenFormat(token)) {
         await tgApi('sendMessage', { chat_id: chatId, text: 'توکن نامعتبر است.' });
-        await tgApi('sendMessage', { chat_id: chatId, text: 'منوی اصلی:', reply_markup: await buildDynamicMainMenu(env, uid) });
         return;
       }
       const ok = await checkRateLimit(env, uid, 'get_by_token', 5, 60_000);
@@ -1547,57 +1399,1962 @@ async function onMessage(msg, env) {
       const code = text.trim();
       const res = await redeemGiftCode(env, uid, code);
       await tgApi('sendMessage', { chat_id: chatId, text: res.message });
-      // After redeem attempt (valid or invalid), return to main menu
-      await tgApi('sendMessage', { chat_id: chatId, text: 'منوی اصلی:', reply_markup: await buildDynamicMainMenu(env, uid) });
       return;
     }
-    if (session.awaiting === 'admin_user_details' && isAdmin(uid) && text) {
+    if (session.awaiting?.startsWith('admin_create_gift:') && isAdmin(uid) && text) {
+      const [, field, base] = session.awaiting.split(':');
+      const draft = base ? JSON.parse(decodeURIComponent(base)) : {};
+      if (field === 'code') draft.code = text.trim();
+      if (field === 'amount') draft.amount = Math.max(0, parseInt(text.trim(), 10) || 0);
+      if (field === 'max') draft.max_uses = Math.max(1, parseInt(text.trim(), 10) || 1);
+      const nextField = field === 'code' ? 'amount' : field === 'amount' ? 'max' : null;
+      if (nextField) {
+        await setSession(env, uid, { awaiting: `admin_create_gift:${nextField}:${encodeURIComponent(JSON.stringify(draft))}` });
+        const prompt = nextField === 'amount' ? 'مبلغ سکه را وارد کنید:' : 'حداکثر تعداد استفاده کل را وارد کنید:';
+        await tgApi('sendMessage', { chat_id: chatId, text: prompt });
+      } else {
+        const create = await createGiftCode(env, draft);
+        if (create.ok) { await addGiftToIndex(env, draft.code); }
+        await setSession(env, uid, {});
+        await tgApi('sendMessage', { chat_id: chatId, text: create.ok ? `کد هدیه ایجاد شد: ${draft.code}` : `خطا: ${create.error||'نامشخص'}` });
+      }
+      return;
+    }
+    if (session.awaiting?.startsWith('admin_reply:')) {
+      if (!isAdmin(uid)) { await setSession(env, uid, {}); await tgApi('sendMessage', { chat_id: chatId, text: 'فقط ادمین‌ها مجاز هستند.' }); return; }
+      const target = Number(session.awaiting.split(':')[1]);
+      if (!text) { await tgApi('sendMessage', { chat_id: chatId, text: 'لطفاً پاسخ را به صورت متن ارسال کنید.' }); return; }
+      let sent = false;
+      try { await tgApi('sendMessage', { chat_id: target, text: `✉️ پاسخ پشتیبانی:\n${text}` }); sent = true; } catch (_) { sent = false; }
+      if (!sent) { await tgApi('sendMessage', { chat_id: chatId, text: '❌ ارسال پیام به کاربر ناموفق بود.' }); return; }
       await setSession(env, uid, {});
-      const targetId = Number(String(text).trim());
-      if (!Number.isFinite(targetId) || targetId <= 0) {
-        await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی نامعتبر است.', reply_markup: await buildDynamicMainMenu(env, uid) });
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ پیام شما به کاربر ارسال شد.' });
+      return;
+    }
+    if (session.awaiting?.startsWith('rename:') && text) {
+      const token = session.awaiting.split(':')[1];
+      const f = await kvGetJson(env, `file:${token}`);
+      if (!f) { await setSession(env, uid, {}); await tgApi('sendMessage', { chat_id: chatId, text: 'فایل یافت نشد.' }); return; }
+      // Only owner or admin can rename
+      if (!isAdmin(uid) && String(f.owner) !== String(uid)) { await setSession(env, uid, {}); await tgApi('sendMessage', { chat_id: chatId, text: 'اجازه تغییر نام ندارید.' }); return; }
+      f.name = text.trim().slice(0, 120);
+      await kvPutJson(env, `file:${token}`, f);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ نام فایل به‌روزرسانی شد.' });
+      return;
+    }
+    if (session.awaiting === 'givepoints_uid' && text && isAdmin(uid)) {
+      const tid = Number(text.trim());
+      if (!Number.isFinite(tid)) { await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی نامعتبر است.' }); return; }
+      await setSession(env, uid, { awaiting: `givepoints_amount:${tid}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'مبلغ سکه را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+      return;
+    }
+    if (session.awaiting === 'takepoints_uid' && text && isAdmin(uid)) {
+      const tid = Number(text.trim());
+      if (!Number.isFinite(tid)) { await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی نامعتبر است.' }); return; }
+      await setSession(env, uid, { awaiting: `takepoints_amount:${tid}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'مبلغ سکه برای کسر را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+      return;
+    }
+    if (session.awaiting?.startsWith('givepoints_amount:') && text && isAdmin(uid)) {
+      const tid = Number(session.awaiting.split(':')[1]);
+      const amount = Number(text.trim());
+      if (!Number.isFinite(amount)) { await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار نامعتبر است.' }); return; }
+      const tKey = `user:${tid}`;
+      const target = (await kvGetJson(env, tKey)) || { id: tid, diamonds: 0 };
+      target.diamonds = (target.diamonds || 0) + amount;
+      await kvPutJson(env, tKey, target);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: `✅ ${amount} سکه به کاربر ${tid} اضافه شد. موجودی جدید: ${target.diamonds}` });
+      try { await tgApi('sendMessage', { chat_id: tid, text: `🎯 ${amount} سکه به حساب شما اضافه شد.` }); } catch (_) {}
+      return;
+    }
+    if (session.awaiting === 'freeze_uid' && text && isAdmin(uid)) {
+      const tid = Number(text.trim());
+      if (!Number.isFinite(tid)) { await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی نامعتبر است.' }); return; }
+      const tKey = `user:${tid}`;
+      const target = (await kvGetJson(env, tKey)) || { id: tid, diamonds: 0 };
+      target.frozen = true;
+      await kvPutJson(env, tKey, target);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: `✅ موجودی کاربر ${tid} فریز شد.` });
+      try { await tgApi('sendMessage', { chat_id: tid, text: `❄️ موجودی سکه شما توسط مدیر فریز شد. تا اطلاع بعدی قابل استفاده نیست.` }); } catch (_) {}
+      return;
+    }
+    if (session.awaiting === 'unfreeze_uid' && text && isAdmin(uid)) {
+      const tid = Number(text.trim());
+      if (!Number.isFinite(tid)) { await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی نامعتبر است.' }); return; }
+      const tKey = `user:${tid}`;
+      const target = (await kvGetJson(env, tKey)) || { id: tid, diamonds: 0 };
+      target.frozen = false;
+      await kvPutJson(env, tKey, target);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: `✅ موجودی کاربر ${tid} آن‌فریز شد.` });
+      try { await tgApi('sendMessage', { chat_id: tid, text: `🧊 موجودی سکه شما توسط مدیر آن‌فریز شد.` }); } catch (_) {}
+      return;
+    }
+    if (session.awaiting?.startsWith('takepoints_amount:') && text && isAdmin(uid)) {
+      const tid = Number(session.awaiting.split(':')[1]);
+      const amount = Number(text.trim());
+      if (!Number.isFinite(amount) || amount <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار نامعتبر است.' }); return; }
+      const tKey = `user:${tid}`;
+      const target = (await kvGetJson(env, tKey)) || { id: tid, diamonds: 0 };
+      const newDiamonds = Math.max(0, (target.diamonds || 0) - amount);
+      target.diamonds = newDiamonds;
+      await kvPutJson(env, tKey, target);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: `✅ ${amount} سکه از کاربر ${tid} کسر شد. موجودی جدید: ${target.diamonds}` });
+      try { await tgApi('sendMessage', { chat_id: tid, text: `➖ ${amount} سکه از حساب شما کسر شد.` }); } catch (_) {}
+      return;
+    }
+    // Settings flows
+    if (session.awaiting === 'set_welcome' && isAdmin(uid) && text) {
+      const s = await getSettings(env);
+      s.welcome_message = text;
+      await setSettings(env, s);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ پیام خوش‌آمد به‌روزرسانی شد.' });
+      return;
+    }
+    if (session.awaiting === 'set_daily_limit' && isAdmin(uid) && text) {
+      const n = Number(text.trim());
+      if (!Number.isFinite(n) || n < 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+      const s = await getSettings(env);
+      s.daily_limit = n;
+      await setSettings(env, s);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ محدودیت روزانه تنظیم شد.' });
+      return;
+    }
+    if (session.awaiting === 'set_cost_dns' && isAdmin(uid) && text) {
+      const n = Number(text.trim());
+      if (!Number.isFinite(n) || n < 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+      const s = await getSettings(env);
+      s.cost_dns = n;
+      await setSettings(env, s);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ هزینه DNS اختصاصی به‌روزرسانی شد.' });
+      return;
+    }
+    if (session.awaiting === 'set_cost_wg' && isAdmin(uid) && text) {
+      const n = Number(text.trim());
+      if (!Number.isFinite(n) || n < 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+      const s = await getSettings(env);
+      s.cost_wg = n;
+      await setSettings(env, s);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ هزینه وایرگارد اختصاصی به‌روزرسانی شد.' });
+      return;
+    }
+    if (session.awaiting === 'set_buttons' && isAdmin(uid) && text) {
+      try {
+        const obj = JSON.parse(text);
+        const s = await getSettings(env);
+        s.button_labels = obj || {};
+        await setSettings(env, s);
+        await setSession(env, uid, {});
+        await tgApi('sendMessage', { chat_id: chatId, text: '✅ برچسب دکمه‌ها به‌روزرسانی شد.' });
+      } catch (_) {
+        await tgApi('sendMessage', { chat_id: chatId, text: 'JSON نامعتبر.' });
+      }
+      return;
+    }
+
+    // Missions create flow (title → reward → period)
+    if (session.awaiting === 'mission_create:title' && isAdmin(uid) && text) {
+      const draft = { title: text.trim() };
+      await setSession(env, uid, { awaiting: `mission_create:reward:${encodeURIComponent(JSON.stringify(draft))}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار سکه جایزه را ارسال کنید (عدد):' });
+      return;
+    }
+    if (session.awaiting?.startsWith('mission_create:reward:') && isAdmin(uid) && text) {
+      const base = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+      const reward = Number(text.trim());
+      if (!Number.isFinite(reward) || reward <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+      base.reward = reward;
+      await setSession(env, uid, { awaiting: `mission_create:period:${encodeURIComponent(JSON.stringify(base))}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'دوره را مشخص کنید: one|daily|weekly' });
+      return;
+    }
+    if (session.awaiting?.startsWith('mission_create:period:') && isAdmin(uid) && text) {
+      const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+      const valid = ['one','daily','weekly'];
+      const p = text.trim().toLowerCase();
+      if (!valid.includes(p)) { await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار نامعتبر. one|daily|weekly' }); return; }
+      draft.period = p === 'one' ? 'once' : p;
+      const created = await createMission(env, draft);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: created.ok ? `✅ ماموریت ایجاد شد (id=${created.id})` : `خطا در ایجاد ماموریت` });
+      return;
+    }
+    if (session.awaiting === 'mission_edit:id' && isAdmin(uid) && text) {
+      const id = text.trim();
+      const m = await kvGetJson(env, `mission:${id}`);
+      if (!m) { await tgApi('sendMessage', { chat_id: chatId, text: 'شناسه نامعتبر.' }); return; }
+      await setSession(env, uid, { awaiting: `mission_edit:field:${encodeURIComponent(JSON.stringify({ id }))}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'کدام فیلد را می‌خواهید ویرایش کنید؟ title|reward|period', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+      return;
+    }
+    if (session.awaiting?.startsWith('mission_edit:field:') && isAdmin(uid) && text) {
+      const base = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+      const field = text.trim().toLowerCase();
+      if (!['title','reward','period'].includes(field)) { await tgApi('sendMessage', { chat_id: chatId, text: 'فیلد نامعتبر.' }); return; }
+      await setSession(env, uid, { awaiting: `mission_edit:value:${field}:${encodeURIComponent(JSON.stringify(base))}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: `مقدار جدید برای ${field} را ارسال کنید:` });
+      return;
+    }
+    if (session.awaiting?.startsWith('mission_edit:value:') && isAdmin(uid) && text) {
+      const parts = session.awaiting.split(':');
+      const field = parts[2];
+      const base = JSON.parse(decodeURIComponent(parts[3]));
+      const key = `mission:${base.id}`;
+      const m = await kvGetJson(env, key);
+      if (!m) { await setSession(env, uid, {}); await tgApi('sendMessage', { chat_id: chatId, text: 'شناسه نامعتبر.' }); return; }
+      if (field === 'title') m.title = text.trim();
+      if (field === 'reward') m.reward = Math.max(0, Number(text.trim()) || 0);
+      if (field === 'period') {
+        const pv = text.trim().toLowerCase();
+        if (!['once','daily','weekly'].includes(pv)) { await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار period نامعتبر است (once|daily|weekly).' }); return; }
+        m.period = pv;
+      }
+      await kvPutJson(env, key, m);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ ماموریت به‌روزرسانی شد.' });
+      return;
+    }
+  // Quiz mission creation flow
+  if (session.awaiting?.startsWith('mission_quiz:q:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    draft.question = text.trim().slice(0, 300);
+    await setSession(env, uid, { awaiting: `mission_quiz:opts:${encodeURIComponent(JSON.stringify(draft))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'گزینه‌ها را هر کدام در یک خط ارسال کنید (حداقل 2 گزینه):' });
+    return;
+  }
+  if (session.awaiting?.startsWith('mission_quiz:opts:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    const options = String(text).split('\n').map(s => s.trim()).filter(Boolean).slice(0, 8);
+    if (options.length < 2) { await tgApi('sendMessage', { chat_id: chatId, text: 'حداقل 2 گزینه لازم است.' }); return; }
+    draft.options = options;
+    await setSession(env, uid, { awaiting: `mission_quiz:correct:${encodeURIComponent(JSON.stringify(draft))}` });
+    const optsList = options.map((o, i) => `${i+1}) ${o}`).join('\n');
+    await tgApi('sendMessage', { chat_id: chatId, text: `شماره گزینه صحیح را ارسال کنید (1 تا ${options.length}):\n\n${optsList}` });
+    return;
+  }
+  if (session.awaiting?.startsWith('mission_quiz:correct:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    const n = Number(String(text).trim());
+    if (!Number.isFinite(n) || n < 1 || n > (draft.options?.length || 0)) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+    draft.correctIndex = n - 1;
+    await setSession(env, uid, { awaiting: `mission_quiz:reward:${encodeURIComponent(JSON.stringify(draft))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار جایزه (سکه) را ارسال کنید:' });
+    return;
+  }
+  if (session.awaiting?.startsWith('mission_quiz:reward:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    const reward = Number(text.trim());
+    if (!Number.isFinite(reward) || reward <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+    draft.reward = reward;
+    draft.period = 'weekly';
+    const created = await createMission(env, { title: `کوییز: ${draft.question.slice(0, 20)}...`, reward: draft.reward, period: 'weekly', type: 'quiz', config: { question: draft.question, options: draft.options, correctIndex: draft.correctIndex } });
+    await setSession(env, uid, {});
+    await tgApi('sendMessage', { chat_id: chatId, text: created.ok ? `✅ کوییز ایجاد شد (id=${created.id})` : 'خطا در ایجاد کوییز' });
+    return;
+  }
+  // Weekly question/contest creation
+  if (session.awaiting?.startsWith('mission_q:question:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    draft.question = text.trim().slice(0, 400);
+    await setSession(env, uid, { awaiting: `mission_q:answer:${encodeURIComponent(JSON.stringify(draft))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'پاسخ صحیح مسابقه را ارسال کنید:' });
+    return;
+  }
+  if (session.awaiting?.startsWith('mission_q:answer:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    draft.answer = text.trim().slice(0, 200);
+    await setSession(env, uid, { awaiting: `mission_q:reward:${encodeURIComponent(JSON.stringify(draft))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'جایزه (سکه) را ارسال کنید:' });
+    return;
+  }
+  // Admin add panel item: title -> photo -> desc
+  if (session.awaiting === 'pitem:add:title' && isAdmin(uid) && text) {
+    const draft = { title: text.trim().slice(0, 80) };
+    await setSession(env, uid, { awaiting: `pitem:add:photo:${encodeURIComponent(JSON.stringify(draft))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'عکس مربوط به این پنل را ارسال کنید.', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (session.awaiting?.startsWith('pitem:add:photo:')) {
+    if (!isAdmin(uid)) { await setSession(env, uid, {}); await tgApi('sendMessage', { chat_id: chatId, text: 'فقط ادمین‌ها مجاز هستند.' }); return; }
+    const base = JSON.parse(decodeURIComponent(session.awaiting.split(':')[3]));
+    const p = msg.photo && msg.photo.length ? msg.photo[msg.photo.length - 1] : null;
+    if (!p) { await tgApi('sendMessage', { chat_id: chatId, text: 'لطفاً یک تصویر ارسال کنید.' }); return; }
+    base.photo_file_id = p.file_id;
+    await setSession(env, uid, { awaiting: `pitem:add:desc:${encodeURIComponent(JSON.stringify(base))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'توضیحات (متن) پنل را ارسال کنید.' });
+    return;
+  }
+  if (session.awaiting?.startsWith('pitem:add:desc:') && text && isAdmin(uid)) {
+    const base = JSON.parse(decodeURIComponent(session.awaiting.split(':')[3]));
+    base.desc = text.trim().slice(0, 2048);
+    await setSession(env, uid, { awaiting: `pitem:add:price:${encodeURIComponent(JSON.stringify(base))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'مبلغ این پنل (تومان) را وارد کنید (عدد):', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (session.awaiting?.startsWith('pitem:add:price:') && text && isAdmin(uid)) {
+    const base = JSON.parse(decodeURIComponent(session.awaiting.split(':')[3]));
+    const price = Math.floor(Number(String(text).trim().replace(/[,\s]/g, '')));
+    if (!Number.isFinite(price) || price <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر. یک مبلغ صحیح و مثبت وارد کنید.' }); return; }
+    base.price_toman = price;
+    const res = await createPanelItem(env, base);
+    await setSession(env, uid, {});
+    await tgApi('sendMessage', { chat_id: chatId, text: res.ok ? '✅ آیتم خرید پنل ثبت شد.' : '❌ خطا در ثبت آیتم.' });
+    return;
+  }
+  if (session.awaiting?.startsWith('mission_q:reward:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    const reward = Number(text.trim());
+    if (!Number.isFinite(reward) || reward <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+    draft.reward = reward;
+    const created = await createMission(env, { title: `سوال هفتگی`, reward: draft.reward, period: 'weekly', type: 'question', config: { question: draft.question, answer: draft.answer } });
+    await setSession(env, uid, {});
+    await tgApi('sendMessage', { chat_id: chatId, text: created.ok ? `✅ سوال هفتگی ایجاد شد (id=${created.id})` : 'خطا در ایجاد سوال' });
+    return;
+  }
+  // Invite mission creation
+  if (session.awaiting?.startsWith('mission_inv:count:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    const needed = Number(text.trim());
+    if (!Number.isFinite(needed) || needed <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+    draft.needed = needed;
+    await setSession(env, uid, { awaiting: `mission_inv:reward:${encodeURIComponent(JSON.stringify(draft))}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'جایزه (سکه) را ارسال کنید:' });
+    return;
+  }
+  if (session.awaiting?.startsWith('mission_inv:reward:') && isAdmin(uid) && text) {
+    const draft = JSON.parse(decodeURIComponent(session.awaiting.split(':')[2]));
+    const reward = Number(text.trim());
+    if (!Number.isFinite(reward) || reward <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد نامعتبر.' }); return; }
+    draft.reward = reward;
+    const created = await createMission(env, { title: `دعوت ${draft.needed} نفر در هفته`, reward: draft.reward, period: 'weekly', type: 'invite', config: { needed: draft.needed } });
+    await setSession(env, uid, {});
+    await tgApi('sendMessage', { chat_id: chatId, text: created.ok ? `✅ مأموریت دعوت ایجاد شد (id=${created.id})` : 'خطا در ایجاد مأموریت دعوت' });
+    return;
+  }
+
+    // Lottery config (step-by-step)
+    if (isAdmin(uid) && session.awaiting === 'lottery_cfg:winners' && text) {
+      const winners = Math.floor(Number((text || '').trim()));
+      if (!Number.isFinite(winners) || winners <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد برندگان نامعتبر است. یک عدد صحیح مثبت وارد کنید.', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } }); return; }
+      const base = { winners };
+      await setSession(env, uid, { awaiting: `lottery_cfg:reward:${btoa(encodeURIComponent(JSON.stringify(base)))}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'جایزه برای هر برنده (تعداد سکه) را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+      return;
+    }
+    if (isAdmin(uid) && session.awaiting?.startsWith('lottery_cfg:reward:') && text) {
+      const base64 = session.awaiting.split(':')[2];
+      const base = JSON.parse(decodeURIComponent(atob(base64)));
+      const reward = Math.floor(Number((text || '').trim()));
+      if (!Number.isFinite(reward) || reward <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد جایزه نامعتبر است. یک عدد صحیح مثبت وارد کنید.', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } }); return; }
+      base.reward_diamonds = reward;
+      await setSession(env, uid, { awaiting: `lottery_cfg:hours:${btoa(encodeURIComponent(JSON.stringify(base)))}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'پس از چند ساعت قرعه‌کشی اجرا شود؟ (عدد صحیح، مثلا 24)', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+      return;
+    }
+    if (isAdmin(uid) && session.awaiting?.startsWith('lottery_cfg:hours:') && text) {
+      const base64 = session.awaiting.split(':')[2];
+      const base = JSON.parse(decodeURIComponent(atob(base64)));
+      const hours = Math.floor(Number((text || '').trim()));
+      if (!Number.isFinite(hours) || hours <= 0) { await tgApi('sendMessage', { chat_id: chatId, text: 'عدد ساعات نامعتبر است. یک عدد صحیح مثبت وارد کنید.', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } }); return; }
+      const cfg = await getLotteryConfig(env);
+      cfg.winners = Number(base.winners || cfg.winners || 0);
+      cfg.reward_diamonds = Number(base.reward_diamonds || cfg.reward_diamonds || 0);
+      cfg.run_every_hours = hours;
+      cfg.next_run_at = now() + (hours * 60 * 60 * 1000);
+      await setLotteryConfig(env, cfg);
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ پیکربندی قرعه‌کشی ذخیره شد.' });
+      return;
+    }
+    if (session.awaiting === 'bulk_meta' && isAdmin(uid) && text) {
+      try {
+        const arr = JSON.parse(text);
+        if (!Array.isArray(arr)) throw new Error('bad array');
+        let updated = 0;
+        for (const item of arr) {
+          const t = item && item.token;
+          if (!t || !isValidTokenFormat(String(t))) continue;
+          const f = await kvGetJson(env, `file:${t}`);
+          if (!f) continue;
+          if (typeof item.name === 'string' && item.name.trim()) f.name = item.name.trim();
+          if (typeof item.category === 'string' && item.category.trim()) f.category = item.category.trim();
+          await kvPutJson(env, `file:${t}`, f);
+          updated++;
+        }
+        await setSession(env, uid, {});
+        await tgApi('sendMessage', { chat_id: chatId, text: `✅ متادیتا اعمال شد. تعداد آیتم‌های به‌روزرسانی‌شده: ${updated}` });
+      } catch (_) {
+        await tgApi('sendMessage', { chat_id: chatId, text: 'JSON نامعتبر.' });
+      }
+      return;
+    }
+  }
+
+  // On /start: do not preserve any pending operation; everything resets on restart
+  try {
+    if (text.startsWith('/start')) {
+      const updateMode = (await kvGetJson(env, 'bot:update_mode')) || false;
+      if (updateMode && !isAdmin(uid)) {
+        await tgApi('sendMessage', { chat_id: chatId, text: '🔧 ربات در حال بروزرسانی است. لطفاً دقایقی دیگر مجدداً تلاش کنید.' });
         return;
       }
-      // Profile
-      const u = (await kvGetJson(env, `user:${targetId}`)) || null;
-      // Uploads summary
-      const upList = (await kvGetJson(env, `uploader:${targetId}`)) || [];
-      let totalDownloads = 0;
-      const recentFiles = [];
-      for (const tok of upList.slice(0, 50)) {
-        const f = await kvGetJson(env, `file:${tok}`);
-        if (f) { totalDownloads += f.downloads || 0; recentFiles.push(f); }
-      }
-      // Purchases (approved)
-      const purchasesIdx = (await kvGetJson(env, 'index:purchases')) || [];
-      const purchases = [];
-      for (const id of purchasesIdx.slice(0, 500)) {
-        const p = await kvGetJson(env, `purchase:${id}`);
-        if (p && p.user_id === targetId && p.status === 'approved') purchases.push(p);
-      }
-      const coinsFromPurchases = purchases.reduce((s,p)=>s + Number(p.diamonds||0), 0);
-      const purchasesLines = purchases.slice(0, 10).map(p => `#${String(p.id).padStart(8,'0')} — ${p.diamonds} سکه — ${(p.price_toman||0).toLocaleString('fa-IR')}ت — ${formatDate(p.processed_at||p.updated_at||p.created_at||0)}`).join('\n') || '—';
-      // Gift redemptions (scan small index)
-      const giftIdx = (await kvGetJson(env, 'gift:index')) || [];
-      const giftsUsed = [];
-      for (const code of giftIdx.slice(0, 200)) {
-        const used = await kvGetJson(env, `giftused:${code}:${targetId}`);
-        if (used) {
-          const g = await kvGetJson(env, `gift:${code}`);
-          giftsUsed.push({ code, amount: g?.amount||0, at: used.used_at||0 });
+      // Hard reset of session/state on /start
+      await setSession(env, uid, {});
+    }
+  } catch (_) {}
+
+  // enforce join to required channels for non-admins (skip on /start to avoid delayed first response)
+  const requireJoin = await getRequiredChannels(env);
+  if (!text.startsWith('/start') && requireJoin.length && !isAdmin(uid)) {
+    const joinedAll = await isUserJoinedAllRequiredChannels(env, uid);
+    if (!joinedAll) {
+      await presentJoinPrompt(env, chatId);
+      return;
+    }
+  }
+
+  // commands
+  if (text.startsWith('/start')) {
+    // Re-enable deep-link downloads while still resetting session on /start
+    const updateMode = (await kvGetJson(env, 'bot:update_mode')) || false;
+    const payload = text.replace('/start', '').trim();
+    if (payload && payload.startsWith('d_')) {
+      const parts = payload.split('_');
+      const token = parts[1] || '';
+      const ref = parts[2] || '';
+      await handleBotDownload(env, uid, chatId, token, ref);
+      return;
+    }
+    // Support referral-only deep links: /start <refId>
+    if (payload) {
+      const refIdNum = Number(payload);
+      if (Number.isFinite(refIdNum) && refIdNum > 0 && refIdNum !== Number(uid)) {
+        // Save pending ref in session and user meta (if not already set)
+        try {
+          const s = await getSession(env, uid);
+          const next = { ...(s || {}) };
+          next.pending_ref = String(refIdNum);
+          await setSession(env, uid, next);
+        } catch (_) {}
+        const uKey = `user:${uid}`;
+        const uMeta = (await kvGetJson(env, uKey)) || { id: uid };
+        if (!uMeta.referred_by) { uMeta.referred_by = refIdNum; await kvPutJson(env, uKey, uMeta); }
+        // Enforce join before crediting
+        const requireJoin2 = await getRequiredChannels(env);
+        if (requireJoin2.length && !isAdmin(uid)) {
+          const joinedAll2 = await isUserJoinedAllRequiredChannels(env, uid);
+          if (!joinedAll2) { await presentJoinPrompt(env, chatId); return; }
+        }
+        // If already joined, credit immediately (once)
+        const userNow = (await kvGetJson(env, uKey)) || { id: uid };
+        if (!userNow.ref_credited) {
+          const refUser = (await kvGetJson(env, `user:${refIdNum}`)) || null;
+          if (refUser) {
+            refUser.diamonds = (refUser.diamonds || 0) + 1;
+            refUser.referrals = (refUser.referrals || 0) + 1;
+            await kvPutJson(env, `user:${refIdNum}`, refUser);
+            userNow.ref_credited = true;
+            userNow.referred_by = userNow.referred_by || refIdNum;
+            await kvPutJson(env, uKey, userNow);
+            // track weekly referral for missions
+            const wk = weekKey();
+            const rk = `ref_week:${refIdNum}:${wk}`;
+            const rec = (await kvGetJson(env, rk)) || { count: 0 };
+            rec.count = (rec.count || 0) + 1;
+            await kvPutJson(env, rk, rec);
+            try { await tgApi('sendMessage', { chat_id: refIdNum, text: '🎉 یک سکه بابت معرفی کاربر جدید دریافت کردید.' }); } catch (_) {}
+          }
         }
       }
-      const coinsFromGifts = giftsUsed.reduce((s,g)=>s + Number(g.amount||0), 0);
-      const giftsLines = giftsUsed.slice(0, 10).map(g => `${g.code} — ${g.amount} سکه — ${g.at ? formatDate(g.at) : '-'}`).join('\n') || '—';
-      const coinsNow = u ? (u.diamonds||0) : 0;
-      const header = u
-        ? `👤 کاربر: ${targetId}${u.username ? ` (@${u.username})` : ''}\n🪙 سکه فعلی: ${coinsNow}\n📈 معرفی‌ها: ${u.referrals||0}\n📅 عضویت: ${u.created_at ? formatDate(u.created_at) : '-'}\n🕒 آخرین فعالیت: ${u.last_seen ? formatDate(u.last_seen) : '-'}`
-        : `کاربر ${targetId} یافت نشد.`;
-      const uploadsSummary = `📂 فایل‌های آپلودشده: ${upList.length}\n📥 مجموع دانلودها: ${totalDownloads}`;
-      const coinsSummary = `➕ دریافتی‌ها:\n- از خرید: ${coinsFromPurchases} سکه\n- از گیفت‌کد: ${coinsFromGifts} سکه`;
-      const txt = `${header}\n\n${uploadsSummary}\n\n${coinsSummary}\n\n🧾 خریدهای تاییدشده (۱۰ تای اخیر):\n${purchasesLines}\n\n🎁 گیفت‌کدهای استفاده‌شده (۱۰ تای اخیر):\n${giftsLines}`;
-      await tgApi('sendMessage', { chat_id: chatId, text: txt });
+    }
+    const settings = await getSettings(env);
+    const welcomeText = settings.welcome_message && !updateMode
+      ? settings.welcome_message
+      : (updateMode && !isAdmin(uid)
+        ? '🔧 ربات در حال بروزرسانی است. لطفاً دقایقی دیگر مجدداً تلاش کنید.'
+        : `سلام ${from.first_name||''}! 🤖\nاز منو گزینه مورد نظر را انتخاب کنید.`);
+    // Enforce join BEFORE showing menu
+    const requireJoin2 = await getRequiredChannels(env);
+    if (requireJoin2.length && !isAdmin(uid)) {
+      const joinedAll2 = await isUserJoinedAllRequiredChannels(env, uid);
+      if (!joinedAll2) { await presentJoinPrompt(env, chatId); return; }
+    }
+    await tgApi('sendMessage', { chat_id: chatId, text: welcomeText, reply_markup: await buildDynamicMainMenu(env, uid) });
+    return;
+  }
+
+  // legacy /join kept for compatibility but routed to CHECK_JOIN
+  if (text.startsWith('/join')) {
+    const ok = await isUserJoinedAllRequiredChannels(env, uid);
+    user.joined = ok; await kvPutJson(env, userKey, user);
+    if (!ok) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '❌ هنوز عضو تمام کانال‌های الزامی نیستید.' });
       return;
+    }
+    // On success, credit referrer once and continue pending download
+    const sess = await getSession(env, uid);
+    const pendingRef = sess?.pending_download?.ref || sess?.pending_ref || user.referred_by;
+    const refIdNum = Number(pendingRef);
+    if (Number.isFinite(refIdNum) && refIdNum !== Number(uid) && !user.ref_credited) {
+      const refUser = (await kvGetJson(env, `user:${refIdNum}`)) || null;
+      if (refUser) {
+        refUser.diamonds = (refUser.diamonds || 0) + 1;
+        refUser.referrals = (refUser.referrals || 0) + 1;
+        await kvPutJson(env, `user:${refIdNum}`, refUser);
+        user.ref_credited = true;
+        user.referred_by = user.referred_by || refIdNum;
+        await kvPutJson(env, userKey, user);
+        // track weekly referral for missions
+        const wk = weekKey();
+        const rk = `ref_week:${refIdNum}:${wk}`;
+        const rec = (await kvGetJson(env, rk)) || { count: 0 };
+        rec.count = (rec.count || 0) + 1;
+        await kvPutJson(env, rk, rec);
+        await tgApi('sendMessage', { chat_id: refIdNum, text: '🎉 یک سکه بابت معرفی کاربر جدید دریافت کردید.' });
+      }
+    }
+    const pendingToken = sess?.pending_download?.token;
+    const pendingDeepRef = sess?.pending_download?.ref || '';
+    if (pendingToken) {
+      const nextSession = { ...(sess || {}) };
+      delete nextSession.pending_download;
+      delete nextSession.pending_ref;
+      await setSession(env, uid, nextSession);
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ عضویت شما تایید شد. ادامه عملیات...' });
+      await handleBotDownload(env, uid, chatId, pendingToken, pendingDeepRef);
+      return;
+    }
+    await tgApi('sendMessage', { chat_id: chatId, text: '✅ عضویت شما تایید شد.' });
+    return;
+  }
+
+  if (text.startsWith('/profile')) {
+    await tgApi('sendMessage', { 
+      chat_id: chatId, 
+      text: `📊 پروفایل شما:\n\n👤 آی‌دی: ${uid}\n🏷 یوزرنیم: ${user.username||'-'}\n🪙 سکه: ${user.diamonds||0}\n📈 معرفی‌ها: ${user.referrals||0}\n📅 عضویت: ${formatDate(user.created_at||0)}` 
+    });
+    return;
+  }
+
+  // Admin command: give diamonds
+  if (isAdmin(uid) && text.startsWith('/givediamonds')) {
+    const parts = text.split(/\s+/);
+    if (parts.length < 3) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'استفاده: /givediamonds <uid> <amount>' });
+      return;
+    }
+    const tid = Number(parts[1]);
+    const amount = Number(parts[2]);
+    if (!Number.isFinite(tid) || !Number.isFinite(amount)) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'پارامتر نامعتبر است.' });
+      return;
+    }
+    const tKey = `user:${tid}`;
+    const target = (await kvGetJson(env, tKey)) || { id: tid, diamonds: 0 };
+    target.diamonds = (target.diamonds || 0) + amount;
+    await kvPutJson(env, tKey, target);
+    await tgApi('sendMessage', { chat_id: chatId, text: `✅ ${amount} سکه به کاربر ${tid} اضافه شد. موجودی جدید: ${target.diamonds}` });
+    try { await tgApi('sendMessage', { chat_id: tid, text: `🎯 ${amount} سکه به حساب شما اضافه شد.` }); } catch (_) {}
+    return;
+  }
+
+  // Admin command: take diamonds
+  if (isAdmin(uid) && text.startsWith('/takediamonds')) {
+    const parts = text.split(/\s+/);
+    if (parts.length < 3) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'استفاده: /takediamonds <uid> <amount>' });
+      return;
+    }
+    const tid = Number(parts[1]);
+    const amount = Number(parts[2]);
+    if (!Number.isFinite(tid) || !Number.isFinite(amount) || amount <= 0) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'پارامتر نامعتبر است.' });
+      return;
+    }
+    const tKey = `user:${tid}`;
+    const target = (await kvGetJson(env, tKey)) || { id: tid, diamonds: 0 };
+    const newDiamonds = Math.max(0, (target.diamonds || 0) - amount);
+    target.diamonds = newDiamonds;
+    await kvPutJson(env, tKey, target);
+    await tgApi('sendMessage', { chat_id: chatId, text: `✅ ${amount} سکه از کاربر ${tid} کسر شد. موجودی جدید: ${target.diamonds}` });
+    try { await tgApi('sendMessage', { chat_id: tid, text: `➖ ${amount} سکه از حساب شما کسر شد.` }); } catch (_) {}
+    return;
+  }
+
+  if (text.startsWith('/myfiles')) {
+    const built = await buildMyFilesKeyboard(env, uid, 0);
+    return tgApi('sendMessage', { chat_id: chatId, text: built.text, reply_markup: built.reply_markup });
+  }
+
+  // command: missions view shortcut
+  if (text.startsWith('/missions')) {
+    const view = await buildMissionsView(env, uid);
+    return tgApi('sendMessage', { chat_id: chatId, text: view.text, reply_markup: view.reply_markup });
+  }
+
+  // admin commands
+  if (isAdmin(uid) && text.startsWith('/broadcast ')) {
+    const message = text.replace('/broadcast ', '').trim();
+    await broadcast(env, message);
+    return tgApi('sendMessage', { chat_id: chatId, text: '📢 پیام به همه کاربران ارسال شد.' });
+  }
+
+  // set cost: /setcost <token> <diamonds>
+  if (text.startsWith('/setcost')) {
+    if (!isAdmin(uid)) return tgApi('sendMessage', { chat_id: chatId, text: 'این دستور فقط برای ادمین مجاز است.' });
+    const parts = text.split(/\s+/);
+    if (parts.length < 3) return tgApi('sendMessage', { chat_id: chatId, text: 'استفاده: /setcost <token> <diamonds>' });
+    const token = parts[1]; const pts = parseInt(parts[2],10) || 0;
+    const file = await kvGetJson(env, `file:${token}`);
+    if (!file) return tgApi('sendMessage', { chat_id: chatId, text: 'توکن پیدا نشد.' });
+    file.cost_points = pts; await kvPutJson(env, `file:${token}`, file);
+    return tgApi('sendMessage', { chat_id: chatId, text: `💰 هزینه فایل تنظیم شد: ${pts} سکه` });
+  }
+
+  // enable/disable a file: /disable <token> , /enable <token>
+  if (isAdmin(uid) && text.startsWith('/disable ')) {
+    const token = text.split(/\s+/)[1]; const file = await kvGetJson(env, `file:${token}`);
+    if (!file) return tgApi('sendMessage', { chat_id: chatId, text: 'توکن پیدا نشد' });
+    file.disabled = true; await kvPutJson(env, `file:${token}`, file);
+    return tgApi('sendMessage', { chat_id: chatId, text: '🔴 فایل غیرفعال شد' });
+  }
+  if (isAdmin(uid) && text.startsWith('/enable ')) {
+    const token = text.split(/\s+/)[1]; const file = await kvGetJson(env, `file:${token}`);
+    if (!file) return tgApi('sendMessage', { chat_id: chatId, text: 'توکن پیدا نشد' });
+    file.disabled = false; await kvPutJson(env, `file:${token}`, file);
+    return tgApi('sendMessage', { chat_id: chatId, text: '🟢 فایل فعال شد' });
+  }
+
+  // document upload handled separately (legacy) -> now routed by upload flow
+  if (msg.document && isAdmin(uid) && !session.awaiting) {
+    const created = await handleAnyUpload(msg, env, { ownerId: uid });
+    if (created) {
+      const m = `✅ فایل آپلود شد:\nنام: ${created.name}\nحجم: ${formatFileSize(created.size||0)}\nتوکن: ${created.token}`;
+      await tgApi('sendMessage', { chat_id: chatId, text: m, reply_markup: buildFileManageKeyboard(created.token, created, true) });
+      return;
+    }
+  }
+
+  // fallback -> show menu
+  // Enforce join before showing menu universally
+  const requireJoinF = await getRequiredChannels(env);
+  if (requireJoinF.length && !isAdmin(uid)) {
+    const joinedAllF = await isUserJoinedAllRequiredChannels(env, uid);
+    if (!joinedAllF) { await presentJoinPrompt(env, chatId); return; }
+  }
+  await sendMainMenu(env, chatId, uid);
+}
+
+async function onCallback(cb, env) {
+  const data = cb.data; const chatId = cb.message.chat.id; const from = cb.from;
+  const uid = from.id;
+  // Ignore callbacks in non-private chats
+  try {
+    const chatType = cb.message && cb.message.chat && cb.message.chat.type;
+    if (chatType && chatType !== 'private') {
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+      return;
+    }
+  } catch (_) {}
+  // Ack immediately to stop Telegram UI spinner
+  try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); } catch (_) {}
+  // enforce block also for callbacks
+  if (!isAdmin(uid)) {
+    try {
+      const blocked = await isUserBlocked(env, uid);
+      if (blocked) {
+        await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+        await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ دسترسی شما توسط مدیر محدود شده است.' });
+        return;
+      }
+    } catch (_) {}
+  }
+  if (data === 'MENU') {
+    try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); } catch (_) {}
+    // Enforce join before showing menu
+    const requireJoin = await getRequiredChannels(env);
+    if (requireJoin.length && !isAdmin(uid)) {
+      const joined = await isUserJoinedAllRequiredChannels(env, uid);
+      if (!joined) { await presentJoinPrompt(env, chatId); return; }
+    }
+    await safeUpdateText(chatId, 'منوی اصلی:', await buildDynamicMainMenu(env, uid), cb);
+    return;
+  }
+  if (data === 'NOOP') {
+    return;
+  }
+  if (data === 'CANCEL') {
+    await setSession(env, uid, {});
+    await tgApi('sendMessage', { chat_id: chatId, text: 'فرآیند لغو شد.', reply_markup: await buildDynamicMainMenu(env, uid) });
+    return;
+  }
+  if (data === 'ADMIN:PANEL' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await safeUpdateText(chatId, '🛠 پنل مدیریت', buildAdminPanelKeyboard(), cb);
+    return;
+  }
+  if (data === 'ADMIN:BACKUP' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'در حال تهیه پشتیبان...' });
+    try {
+      const backup = await createKvBackup(env);
+      const adminIds = await getAdminIds(env);
+      const mainAdmin = adminIds && adminIds.length ? adminIds[0] : (MAIN_ADMIN_ID || uid);
+      const content = JSON.stringify(backup, null, 2);
+      await tgApi('sendMessage', { chat_id: mainAdmin, text: '📦 پشتیبان دیتابیس آماده شد. در حال ارسال...' });
+      const filename = `backup_${new Date().toISOString().slice(0,10)}.json`;
+      const form = new FormData();
+      form.append('chat_id', String(mainAdmin));
+      form.append('caption', filename);
+      // Use Blob with filename for Telegram file upload
+      form.append('document', new Blob([content], { type: 'application/json' }), filename);
+      const res = await tgUpload('sendDocument', form);
+      if (!res || !res.ok) {
+        throw new Error('telegram_upload_failed');
+      }
+    } catch (e) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '❌ خطا در تهیه پشتیبان.' });
+    }
+    return;
+  }
+  if (data === 'ADMIN:PAYMENTS' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const idx = (await kvGetJson(env, 'index:purchases')) || [];
+    // Compute status counts (scan up to first 500 items for speed)
+    let pendingCount = 0, approvedCount = 0, rejectedCount = 0, totalCount = 0;
+    for (const pid of idx.slice(0, 500)) {
+      const p = await kvGetJson(env, `purchase:${pid}`);
+      if (!p) continue;
+      totalCount++;
+      if (p.status === 'pending_review') pendingCount++;
+      else if (p.status === 'approved') approvedCount++;
+      else if (p.status === 'rejected') rejectedCount++;
+    }
+    const summary = `💳 مدیریت پرداخت‌ها
+وضعیت‌ها:
+• در انتظار بررسی: ${pendingCount.toLocaleString('fa-IR')}
+• تایید شده: ${approvedCount.toLocaleString('fa-IR')}
+• رد شده: ${rejectedCount.toLocaleString('fa-IR')}
+• کل: ${totalCount.toLocaleString('fa-IR')}
+
+برای مشاهده لیست، یکی از فیلترها را انتخاب کنید.`;
+    const tabs = { inline_keyboard: [
+      [
+        { text: `در انتظار (${pendingCount})`, callback_data: 'ADMIN:PAYMENTS:pending:0' },
+        { text: `تایید شده (${approvedCount})`, callback_data: 'ADMIN:PAYMENTS:approved:0' },
+        { text: `رد شده (${rejectedCount})`, callback_data: 'ADMIN:PAYMENTS:rejected:0' },
+        { text: `همه (${totalCount})`, callback_data: 'ADMIN:PAYMENTS:all:0' }
+      ],
+      [{ text: '⬅️ بازگشت به پنل', callback_data: 'ADMIN:PANEL' }]
+    ] };
+    await tgApi('sendMessage', { chat_id: chatId, text: summary, reply_markup: tabs });
+
+    // Also show first page of pending by default
+    const pageSize = 10;
+    const list = [];
+    let hasMore = false;
+    for (const pid of idx) {
+      const p = await kvGetJson(env, `purchase:${pid}`);
+      if (!p) continue;
+      if (p.status === 'pending_review') {
+        if (list.length < pageSize) list.push(p); else { hasMore = true; break; }
+      }
+    }
+    if (!list.length) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'هیچ پرداخت در انتظاری وجود ندارد.', reply_markup: { inline_keyboard: [[{ text: '⬅️ انتخاب فیلتر دیگر', callback_data: 'ADMIN:PAYMENTS' }], [{ text: '⬅️ بازگشت به پنل', callback_data: 'ADMIN:PANEL' }]] } });
+      return;
+    }
+    const lines = list.map(p => {
+      const typeLabel = p.type === 'panel' ? `🛍 پنل: ${p.panel_title||'-'}` : `🪙 سکه: ${p.diamonds}`;
+      const amount = (p.price_toman||0).toLocaleString('fa-IR');
+      return `#${String(p.id).padStart(8,'0')} | ${typeLabel} | کاربر: ${p.user_id} | مبلغ: ${amount}ت | وضعیت: در انتظار`;
+    });
+    const text = `فهرست در انتظار (صفحه 1):\n${lines.join('\n')}`;
+    const kb = { inline_keyboard: [
+      ...list.map(p => ([{ text: `🧾 ${String(p.id).padStart(8,'0')} — مشاهده`, callback_data: `ADMIN:PAY:VIEW:${p.id}` }])),
+      [
+        ...(hasMore ? [{ text: '▶️ بعدی', callback_data: 'ADMIN:PAYMENTS:pending:1' }] : [])
+      ],
+      [{ text: '🔎 تغییر فیلتر', callback_data: 'ADMIN:PAYMENTS' }],
+      [{ text: '⬅️ بازگشت به پنل', callback_data: 'ADMIN:PANEL' }]
+    ] };
+    await safeUpdateText(chatId, text, kb, cb);
+    return;
+  }
+  if (data.startsWith('ADMIN:PAYMENTS:') && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const parts = data.split(':');
+    const status = parts[2] || 'pending';
+    const page = Math.max(0, parseInt(parts[3] || '0', 10) || 0);
+    const pageSize = 10;
+    const idx = (await kvGetJson(env, 'index:purchases')) || [];
+    const list = [];
+    let matchedCount = 0;
+    let hasMore = false;
+    const matches = (p) => {
+      if (status === 'all') return true;
+      if (status === 'pending') return p.status === 'pending_review';
+      if (status === 'approved') return p.status === 'approved';
+      if (status === 'rejected') return p.status === 'rejected';
+      return false;
+    };
+    for (const pid of idx) {
+      const p = await kvGetJson(env, `purchase:${pid}`);
+      if (!p || !matches(p)) continue;
+      if (matchedCount >= page * pageSize && list.length < pageSize) list.push(p);
+      matchedCount++;
+      if (list.length === pageSize && matchedCount > (page + 1) * pageSize) { hasMore = true; break; }
+    }
+    const headerLabel = status === 'pending' ? 'در انتظار' : status === 'approved' ? 'تایید شده' : status === 'rejected' ? 'رد شده' : 'همه';
+    if (!list.length) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `موردی برای «${headerLabel}» در این صفحه یافت نشد.`, reply_markup: { inline_keyboard: [
+        [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PAYMENTS' }],
+      ] } });
+      return;
+    }
+    const lines = list.map(p => {
+      const typeLabel = p.type === 'panel' ? `🛍 پنل: ${p.panel_title||'-'}` : `🪙 سکه: ${p.diamonds}`;
+      const amount = (p.price_toman||0).toLocaleString('fa-IR');
+      const st = p.status === 'pending_review' ? 'در انتظار' : p.status === 'approved' ? 'تایید شده' : p.status === 'rejected' ? 'رد شده' : p.status;
+      return `#${String(p.id).padStart(8,'0')} | ${typeLabel} | کاربر: ${p.user_id} | مبلغ: ${amount}ت | وضعیت: ${st}`;
+    });
+    const text = `فهرست ${headerLabel} (صفحه ${page + 1}):\n${lines.join('\n')}`;
+    const nav = [];
+    if (page > 0) nav.push({ text: '◀️ قبلی', callback_data: `ADMIN:PAYMENTS:${status}:${page - 1}` });
+    if (hasMore) nav.push({ text: '▶️ بعدی', callback_data: `ADMIN:PAYMENTS:${status}:${page + 1}` });
+    const kb = { inline_keyboard: [
+      ...list.map(p => ([{ text: `🧾 ${String(p.id).padStart(8,'0')} — مشاهده`, callback_data: `ADMIN:PAY:VIEW:${p.id}` }])),
+      nav,
+      [
+        { text: 'در انتظار', callback_data: 'ADMIN:PAYMENTS:pending:0' },
+        { text: 'تایید شده', callback_data: 'ADMIN:PAYMENTS:approved:0' },
+        { text: 'رد شده', callback_data: 'ADMIN:PAYMENTS:rejected:0' },
+        { text: 'همه', callback_data: 'ADMIN:PAYMENTS:all:0' }
+      ],
+      [{ text: '⬅️ بازگشت به پنل', callback_data: 'ADMIN:PANEL' }]
+    ] };
+    await tgApi('sendMessage', { chat_id: chatId, text, reply_markup: kb });
+    return;
+  }
+  if (data.startsWith('ADMIN:PAY:VIEW:') && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const id = data.split(':')[3];
+    const p = await kvGetJson(env, `purchase:${id}`);
+    if (!p) { await tgApi('sendMessage', { chat_id: chatId, text: 'سفارش یافت نشد.' }); return; }
+    const isPanel = p.type === 'panel';
+    const hdr = isPanel
+      ? `خرید پنل #${String(p.id).padStart(8,'0')}
+کاربر: ${p.user_id}
+پنل: ${p.panel_title||'-'}
+مبلغ: ${(p.price_toman||0).toLocaleString('fa-IR')} تومان
+وضعیت: ${p.status}`
+      : `خرید #${String(p.id).padStart(8,'0')}
+کاربر: ${p.user_id}
+بسته: ${p.diamonds} سکه
+مبلغ: ${(p.price_toman||0).toLocaleString('fa-IR')} تومان
+وضعیت: ${p.status}`;
+    const actions = [];
+    if (p.status === 'pending_review') {
+      if (isPanel) {
+        actions.push([{ text: '✉️ رفتن به پیوی کاربر', url: `tg://user?id=${p.user_id}` }, { text: '❌ رد', callback_data: `PAYREJ:${p.id}` }]);
+      } else {
+        actions.push([{ text: '✅ تایید و افزودن سکه', callback_data: `PAYAPP:${p.id}` }, { text: '❌ رد', callback_data: `PAYREJ:${p.id}` }]);
+      }
+    }
+    actions.push([{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PAYMENTS' }]);
+    const kb = { inline_keyboard: actions };
+    if (p.receipt_file_id) {
+      try {
+        await tgApi('sendPhoto', { chat_id: chatId, photo: p.receipt_file_id, caption: hdr, reply_markup: kb });
+      } catch (_) {
+        await tgApi('sendDocument', { chat_id: chatId, document: p.receipt_file_id, caption: hdr, reply_markup: kb });
+      }
+    } else {
+      await tgApi('sendMessage', { chat_id: chatId, text: hdr, reply_markup: kb });
+    }
+    return;
+  }
+  if (data === 'HELP') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'راهنما' });
+    const isAdminUser = isAdmin(uid);
+    const userGuide = `📚 راهنمای استفاده\n\nمنوی اصلی:\n- 👤 پروفایل: نمایش آی‌دی، یوزرنیم، موجودی سکه، تعداد معرفی‌ها و تاریخ عضویت. در صورت فعال بودن مأموریت‌ها، پیشرفت شما نیز نمایش داده می‌شود.\n- دریافت لینک اختصاصی: لینک دعوت اختصاصی شما را می‌دهد. با هر کاربر فعال که از لینک شما وارد ربات شود، 1 سکه دریافت می‌کنید.\n- 🔑 دریافت با توکن: توکن فایل را ارسال کنید تا فایل داخل ربات برای شما ارسال شود. اگر فایل هزینه داشته باشد، پیش از ارسال از موجودی سکه شما کسر می‌شود. ممکن است سقف روزانه دریافت نیز فعال باشد.\n- 🎁 کد هدیه: کد گیفت را وارد کنید تا در صورت معتبر بودن، سکه به موجودی شما اضافه شود. (برخی کدها محدودیت تعداد استفاده دارند.)\n- 🆘 پشتیبانی: پیام یا تصویر خود را ارسال کنید تا برای مدیر ارسال شود؛ پاسخ از همین ربات به شما برمی‌گردد.\n- 💳 خرید سکه: بسته را انتخاب کنید، مبلغ را کارت‌به‌کارت کنید و تصویر رسید را بفرستید. پس از تأیید مدیر، سکه به حساب شما اضافه می‌شود.\n- 📆 مأموریت‌ها: فهرست مأموریت‌های فعال + دکمه «دریافت پاداش هفتگی (هر ۷ روز)» برای دریافت سکه رایگان.\n- 🎟 قرعه‌کشی: در صورت فعال بودن، می‌توانید وضعیت را ببینید و روزانه ثبت‌نام کنید.\n\nدریافت و اشتراک‌گذاری فایل:\n- اگر عضویت در کانال‌های اجباری فعال باشد، ابتدا باید عضو شوید و سپس «بررسی عضویت» را بزنید.\n- برای اشتراک‌گذاری فایل‌ها، از دکمه «لینک» استفاده کنید تا لینک ورود مستقیم به ربات ساخته شود.\n\nمدیریت فایل‌های شخصی:\n- با دستور /myfiles، فهرست فایل‌های خود را می‌بینید.\n- برای هر فایل: «دریافت»، «کپی لینک» و «تغییر نام» (برای مالک) در دسترس است. اگر فایل هزینه داشته باشد، پیش از دریافت سکه کسر می‌شود.`;
+    const adminGuide = `📚 راهنمای مدیر\n\nمنوی اصلی کاربر:\n- همان گزینه‌های کاربری نمایش داده می‌شود؛ شما علاوه‌بر آن به «پنل مدیریت» دسترسی دارید.\n\nپنل مدیریت (دکمه‌های اصلی):\n- 📊 آمار: نمایش تعداد کاربران، فایل‌ها، دانلودها و شاخص‌های کلیدی.\n- 🛑 تغییر وضعیت سرویس: خاموش/روشن کردن پاسخ‌دهی ربات.\n- 🛠 حالت آپدیت: محدودسازی ربات به ادمین‌ها برای بروزرسانی/نگه‌داری موقت.\n- 📢 ارسال اعلان: ارسال پیام همگانی به همه کاربران (با رعایت محدودیت‌های تلگرام).\n- ⚙️ تنظیمات سرویس: ویرایش پیام خوش‌آمد، سقف روزانه دریافت، و عناوین دکمه‌های منوی اصلی.\n- 📂 مدیریت فایل‌ها: فهرست فایل‌های شما + جزئیات هر آیتم:\n  • 📥 دریافت: ارسال فایل در چت.\n  • 🔗 لینک: ساخت لینک اشتراک‌گذاری داخل ربات.\n  • 💰 هزینه: تعیین/تغییر تعداد سکه موردنیاز (0 = رایگان).\n  • 🔴/🟢 غیرفعال/فعال: قطع/وصل دسترسی به فایل.\n  • 🗑 حذف: حذف کامل آیتم.\n  • ♻️ جایگزینی محتوا: آپلود محتوای جدید روی همان توکن.\n- 📤 آپلود فایل: ارسال متن/سند/عکس/ویدیو/صدا/ویس و ساخت توکن و لینک اختصاصی.\n- 📤 آپلود گروهی: چندین آیتم را پشت‌سرهم بفرستید؛ سپس با «تنظیم نام/دسته» متادیتا را گروهی اعمال کرده و در پایان «پایان» را بزنید.\n- 📣 کانال‌های اجباری: افزودن/حذف کانال‌هایی که عضویت آنها برای استفاده از ربات لازم است.\n- 👑 مدیریت ادمین‌ها: افزودن/حذف ادمین‌ها (بر اساس آی‌دی عددی).\n- 🎟 مدیریت گیفت‌کد: ایجاد، فعال/غیرفعال و حذف گیفت‌کد؛ همراه با شمارش تعداد استفاده.\n- 🎯 افزودن سکه: شارژ دستی موجودی سکه یک کاربر با وارد کردن آی‌دی و مقدار.\n- 📆 مأموریت‌ها: ایجاد/حذف مأموریت با تعیین جایزه (سکه) و دوره (یک‌بار، روزانه، هفتگی).\n- 🎟 قرعه‌کشی: فعال/غیرفعال، تنظیم تعداد برندگان و جایزه، مشاهده تاریخچه؛ کاربران می‌توانند روزانه ثبت‌نام کنند.\n\nنکات عملی:\n- برای دقت آمار دانلود و ارجاع، لینک داخل ربات را برای کاربران ارسال کنید.\n- اگر هزینه فایل 0 باشد، دریافت آن رایگان است.\n- بسته‌های سکه قابل تغییر در تنظیمات/کد هستند و بررسی پرداخت به‌صورت دستی توسط ادمین انجام می‌شود.`;
+    await tgApi('sendMessage', { chat_id: chatId, text: isAdminUser ? adminGuide : userGuide });
+    return;
+  }
+  // -------- Admin: panel items management --------
+  if (data === 'ADMIN:PANEL_ITEMS' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const kb = { inline_keyboard: [
+      [{ text: '➕ افزودن آیتم', callback_data: 'ADMIN:PITEMS_ADD' }],
+      [{ text: '📃 لیست آیتم‌ها', callback_data: 'ADMIN:PITEMS_LIST' }],
+      [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PANEL' }]
+    ] };
+    await safeUpdateText(chatId, '🛍 مدیریت خرید پنل', kb, cb);
+    return;
+  }
+  if (data === 'ADMIN:PITEMS_ADD' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await setSession(env, uid, { awaiting: 'pitem:add:title' });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'عنوان دکمه/پنل را ارسال کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (data === 'ADMIN:PITEMS_LIST' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const items = await listPanelItems(env);
+    if (!items.length) {
+      await safeUpdateText(chatId, 'هیچ آیتمی ثبت نشده است.', { inline_keyboard: [[{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PANEL_ITEMS' }]] }, cb);
+      return;
+    }
+    const rows = [];
+    for (const it of items) {
+      rows.push([{ text: `👁 ${it.title}`, callback_data: `ADMIN:PITEMS_VIEW:${it.id}` }]);
+      rows.push([{ text: '🗑 حذف', callback_data: `ADMIN:PITEMS_DEL:${it.id}` }]);
+    }
+    rows.push([{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PANEL_ITEMS' }]);
+    await safeUpdateText(chatId, 'فهرست آیتم‌ها:', { inline_keyboard: rows }, cb);
+    return;
+  }
+  if (data.startsWith('ADMIN:PITEMS_VIEW:') && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const id = data.split(':')[2];
+    const it = await getPanelItem(env, id);
+    if (!it) { await tgApi('sendMessage', { chat_id: chatId, text: 'آیتم یافت نشد.' }); return; }
+    const caption = (it.desc || '').slice(0, 1024);
+    try {
+      await tgApi('sendPhoto', { chat_id: chatId, photo: it.photo_file_id, caption: `${it.title}\n\n${caption}`, reply_markup: { inline_keyboard: [[{ text: '🗑 حذف', callback_data: `ADMIN:PITEMS_DEL:${it.id}` }], [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PITEMS_LIST' }]] } });
+    } catch (_) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `${it.title}\n\n${caption}`, reply_markup: { inline_keyboard: [[{ text: '🗑 حذف', callback_data: `ADMIN:PITEMS_DEL:${it.id}` }], [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PITEMS_LIST' }]] } });
+    }
+    return;
+  }
+  if (data.startsWith('ADMIN:PITEMS_DEL:') && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const id = data.split(':')[2];
+    await deletePanelItem(env, id);
+    await safeUpdateText(chatId, 'آیتم حذف شد.', { inline_keyboard: [[{ text: '↻ بروزرسانی فهرست', callback_data: 'ADMIN:PITEMS_LIST' }], [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PANEL_ITEMS' }]] }, cb);
+    return;
+  }
+  if (data === 'SUPPORT') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    // Redirect to account submenu support area
+    await tgApi('sendMessage', { chat_id: chatId, text: 'برای دسترسی به پشتیبانی به بخش «حساب کاربری» بروید.', reply_markup: { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] } });
+    return;
+  }
+  if (data === 'SUPPORT:MSG') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await setSession(env, uid, { awaiting: 'support_wait' });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'پیام خود را برای پشتیبانی ارسال کنید. می‌توانید متن، عکس یا فایل ارسال کنید.', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  // Global cancel: clear session and go back to menu (edit in place if possible)
+  if (data === 'CANCEL') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await setSession(env, uid, {});
+    await safeUpdateText(chatId, 'لغو شد. منوی اصلی:', await buildDynamicMainMenu(env, uid), cb);
+    return;
+  }
+  // -------- Panel buy (catalog) - user facing --------
+  if (data === 'PANEL_BUY') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const items = await listPanelItems(env);
+    if (!items.length) {
+      await safeUpdateText(chatId, 'فعلاً موردی برای خرید پنل ثبت نشده است.', { inline_keyboard: [[{ text: '🏠 منو', callback_data: 'MENU' }]] }, cb);
+      return;
+    }
+    const rows = items.map(it => ([{ text: it.title || 'آیتم', callback_data: `PANEL:VIEW:${it.id}` }]));
+    rows.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
+    await safeUpdateText(chatId, 'یکی از پنل‌ها را انتخاب کنید:', { inline_keyboard: rows }, cb);
+    return;
+  }
+  if (data.startsWith('PANEL:VIEW:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const id = data.split(':')[2];
+    const it = await getPanelItem(env, id);
+    if (!it) { await tgApi('sendMessage', { chat_id: chatId, text: 'مورد یافت نشد.' }); return; }
+    const caption = `${it.title}\n\n${(it.desc || '').slice(0, 900)}\n\n💰 مبلغ: ${(Number(it.price_toman||0)).toLocaleString('fa-IR')} تومان`;
+    try {
+      await tgApi('sendPhoto', { chat_id: chatId, photo: it.photo_file_id, caption, reply_markup: { inline_keyboard: [[{ text: '🛒 خرید پنل', callback_data: `PANEL:BUY:${it.id}` }],[{ text: '⬅️ بازگشت', callback_data: 'PANEL_BUY' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] } });
+    } catch (_) {
+      await tgApi('sendMessage', { chat_id: chatId, text: caption, reply_markup: { inline_keyboard: [[{ text: '🛒 خرید پنل', callback_data: `PANEL:BUY:${it.id}` }],[{ text: '⬅️ بازگشت', callback_data: 'PANEL_BUY' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] } });
+    }
+    return;
+  }
+  // Admin TAKERS: list of users who downloaded a file
+  if (data.startsWith('TAKERS:') && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const token = data.split(':')[1];
+    const f = await kvGetJson(env, `file:${token}`);
+    if (!f) { await tgApi('sendMessage', { chat_id: chatId, text: 'فایل یافت نشد.' }); return; }
+    const list = await getFileTakers(env, token, 50);
+    const lines = list.length ? list.map((it, i) => `${i+1}. ${it.id} — ${formatDate(it.at)}`).join('\n') : '—';
+    const text = `👥 لیست دریافت‌کنندگان (${(f.name||'file')})\n\n${lines}`;
+    const kb = { inline_keyboard: [[{ text: '⬅️ بازگشت', callback_data: `DETAILS:${token}:0` }], [{ text: '🏠 منو', callback_data: 'MENU' }]] };
+    await tgApi('sendMessage', { chat_id: chatId, text, reply_markup: kb });
+    return;
+  }
+  if (data.startsWith('PANEL:BUY:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const id = data.split(':')[2];
+    const it = await getPanelItem(env, id);
+    if (!it) { await tgApi('sendMessage', { chat_id: chatId, text: 'مورد یافت نشد.' }); return; }
+    const pid = await generatePurchaseId(env);
+    const rec = { id: pid, user_id: uid, panel_id: it.id, panel_title: it.title, price_toman: Number(it.price_toman||0), status: 'awaiting_receipt', created_at: now(), type: 'panel' };
+    await kvPutJson(env, `purchase:${pid}`, rec);
+    try {
+      const idxKey = 'index:purchases';
+      const idx = (await kvGetJson(env, idxKey)) || [];
+      idx.unshift(pid);
+      if (idx.length > 1000) idx.length = 1000;
+      await kvPutJson(env, idxKey, idx);
+    } catch (_) {}
+    const txt = `🛒 خرید پنل: ${it.title}
+مبلغ: ${(Number(it.price_toman||0)).toLocaleString('fa-IR')} تومان
+شناسه خرید: \`${pid}\`
+لطفاً مبلغ را به کارت زیر واریز کنید و سپس «پرداخت کردم» را بزنید:
+
+کارت:
+\`${BANK_CARD_NUMBER}\`
+نام: **${BANK_CARD_NAME}**
+
+پس از تایید رسید، ادمین برای ارسال پنل و توضیحات به پیوی شما پیام می‌دهد.`;
+    await tgApi('sendMessage', { chat_id: chatId, text: txt, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+      [{ text: '✅ پرداخت کردم', callback_data: `PANEL:PAID:${pid}` }],
+      [{ text: '⬅️ بازگشت', callback_data: `PANEL:VIEW:${it.id}` }],
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ] } });
+    return;
+  }
+  if (data.startsWith('PANEL:PAID:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const pid = data.split(':')[2];
+    const key = `purchase:${pid}`;
+    const p = await kvGetJson(env, key);
+    if (!p || p.user_id !== uid || p.status !== 'awaiting_receipt' || p.type !== 'panel') {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ درخواست نامعتبر یا منقضی است.' });
+      return;
+    }
+    await setSession(env, uid, { awaiting: `payment_receipt:${pid}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: `شناسه خرید شما: \`${pid}\`\nلطفاً عکس رسید پرداخت را ارسال کنید.`, parse_mode: 'Markdown' });
+    return;
+  }
+  if (data === 'PRIVATE_SERVER') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const kb = { inline_keyboard: [
+      [{ text: '🧩 دی ان اس اختصاصی', callback_data: 'PS:DNS' }],
+      [{ text: '🔒 کانفیگ اوپن‌وی‌پی‌ان', callback_data: 'PS:OVPN' }],
+      [{ text: '🛰 وایرگارد اختصاصی', callback_data: 'PS:WG' }],
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ] };
+    await safeUpdateText(chatId, '🛡️ سرور اختصاصی — یک گزینه را انتخاب کنید:', kb, cb);
+    return;
+  }
+  if (data === 'PS:OVPN') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const countries = ['ES','DE','FR','PH','JP','TR','SE','NL','DK','BE','CH','CN'];
+    const page = 0;
+    const perPage = 12;
+    const totalPages = Math.ceil(countries.length / perPage);
+    const rows = [];
+    const slice = countries.slice(page*perPage, page*perPage + perPage);
+    for (let i = 0; i < slice.length; i += 2) {
+      const c1 = slice[i]; const c2 = slice[i+1];
+      const r = [{ text: `${countryFlag(c1)} ${dnsCountryLabel(c1)}`, callback_data: `PS:OVPN_LOC:${c1}` }];
+      if (c2) r.push({ text: `${countryFlag(c2)} ${dnsCountryLabel(c2)}`, callback_data: `PS:OVPN_LOC:${c2}` });
+      rows.push(r);
+    }
+    rows.push([{ text: '⬅️ بازگشت', callback_data: 'PRIVATE_SERVER' }]);
+    rows.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
+    if (totalPages > 1) {
+      const label = `${page+1}/${totalPages} صفحه ${page+1} از ${totalPages}`;
+      const nav = [{ text: label, callback_data: 'NOOP' }];
+      if (page < totalPages - 1) nav.push({ text: '▶️ صفحه بعد', callback_data: `PS:OVPN_PAGE:${page+1}` });
+      rows.push(nav);
+    }
+    await tgApi('sendMessage', { chat_id: chatId, text: '🌐 کشور مورد نظر برای دی ان اس اختصاصی را انتخاب کنید:', reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith('PS:OVPN_PAGE:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const countries = ['ES','DE','FR','PH','JP','TR','SE','NL','DK','BE','CH','CN'];
+    const perPage = 12;
+    const totalPages = Math.ceil(countries.length / perPage);
+    let page = parseInt(data.split(':')[2], 10) || 0;
+    if (page < 0) page = 0;
+    if (page >= totalPages) page = totalPages - 1;
+    const start = page * perPage;
+    const slice = countries.slice(start, start + perPage);
+    const rows = [];
+    for (let i = 0; i < slice.length; i += 2) {
+      const c1 = slice[i]; const c2 = slice[i+1];
+      const r = [{ text: `${countryFlag(c1)} ${dnsCountryLabel(c1)}`, callback_data: `PS:OVPN_LOC:${c1}` }];
+      if (c2) r.push({ text: `${countryFlag(c2)} ${dnsCountryLabel(c2)}`, callback_data: `PS:OVPN_LOC:${c2}` });
+      rows.push(r);
+    }
+    if (totalPages > 1) {
+      const label = `${page+1}/${totalPages} صفحه ${page+1} از ${totalPages}`;
+      const nav = [];
+      if (page > 0) nav.push({ text: '◀️ صفحه قبل', callback_data: `PS:OVPN_PAGE:${page-1}` });
+      nav.push({ text: label, callback_data: 'NOOP' });
+      if (page < totalPages - 1) nav.push({ text: '▶️ صفحه بعد', callback_data: `PS:OVPN_PAGE:${page+1}` });
+      rows.push(nav);
+    }
+    rows.push([{ text: '⬅️ بازگشت', callback_data: 'PRIVATE_SERVER' }]);
+    rows.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
+    await tgApi('sendMessage', { chat_id: chatId, text: '🌐 کشور مورد نظر برای دی ان اس اختصاصی را انتخاب کنید:', reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith('PS:DNS:')) {
+    const code = data.split(':')[2];
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    // location disable check
+    if (await isLocationDisabled(env, 'dns', code)) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش درحال توسعه و بروزرسانی می‌باشد و موقتا غیر فعال است.' });
+      return;
+    }
+    // ask to confirm payment of 1 diamond
+    const userKey = `user:${uid}`;
+    const user = (await kvGetJson(env, userKey)) || { id: uid, diamonds: 0 };
+    if (user.frozen && !isAdmin(uid)) { await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ موجودی شما فریز است.' }); return; }
+    const settings = await getSettings(env);
+    const cost = settings.cost_dns || 1;
+    const text = `🧩 دی ان اس اختصاصی (${dnsCountryLabel(code)})\n\n💎 هزینه: ${cost} سکه\n💳 آیا پرداخت انجام شود؟\n\n👤 موجودی شما: ${user.diamonds || 0}`;
+    const kb = { inline_keyboard: [
+      [{ text: '✅ پرداخت و دریافت', callback_data: `PS:DNSCONF:${code}` }],
+      [{ text: '❌ انصراف', callback_data: 'PS:DNS' }]
+    ] };
+    await tgApi('sendMessage', { chat_id: chatId, text, reply_markup: kb });
+    return;
+  }
+  if (data.startsWith('PS:DNSCONF:')) {
+    const code = data.split(':')[2];
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    // location disable check safety on confirm
+    if (await isLocationDisabled(env, 'dns', code)) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش درحال توسعه و بروزرسانی میباشد و موقتا غیر فعال' });
+      return;
+    }
+    const userKey = `user:${uid}`;
+    const user = (await kvGetJson(env, userKey)) || { id: uid, diamonds: 0 };
+    const settings = await getSettings(env);
+    const cost = settings.cost_dns || 1;
+    if ((user.diamonds || 0) < cost) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ سکه کافی نیست. این سرویس ${cost} سکه هزینه دارد.` });
+      return;
+    }
+    user.diamonds = (user.diamonds || 0) - cost;
+    await kvPutJson(env, userKey, user);
+    let addrs;
+    try {
+      addrs = await generateDnsAddresses(env, code);
+    } catch (_) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'کشور انتخاب‌شده پشتیبانی نمی‌شود.' });
+      return;
+    }
+    // save server entry for user
+    try {
+      const listKey = `user:${uid}:servers`;
+      const list = (await kvGetJson(env, listKey)) || [];
+      list.unshift({ id: `${now()}`, type: 'dns', country: code, v4: addrs.ip4, v6: [addrs.ip6a, addrs.ip6b], created_at: now() });
+      if (list.length > 200) list.length = 200;
+      await kvPutJson(env, listKey, list);
+    } catch (_) {}
+    const caption = `🔧 سرور اختصاصی (${dnsCountryLabel(code)})\n\n` +
+      `ℹ️ دی‌ان‌اس اول (تانل) را از این پست بردارید:\nhttps://t.me/NoiDUsers/117\n\n` +
+      `IPv4:\n\`${addrs.ip4}\`\n\n` +
+      `IPv6-1:\n\`${addrs.ip6a}\`\n\n` +
+      `IPv6-2:\n\`${addrs.ip6b}\``;
+    await tgApi('sendMessage', { chat_id: chatId, text: caption, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+      [{ text: '⬅️ بازگشت', callback_data: 'PS:DNS' }],
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ] } });
+    return;
+  }
+  if (data === 'MY_SERVERS') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const listKey = `user:${uid}:servers`;
+    const list = (await kvGetJson(env, listKey)) || [];
+    if (!list.length) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'هنوز سروری ندارید.' });
+      return;
+    }
+    // group by country and type, show as inline buttons per country
+    const groups = {};
+    for (const s of list) {
+      const key = `${s.country||'UNK'}:${(s.type||'dns').toUpperCase()}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(s);
+    }
+    const rows = [];
+    for (const [k, arr] of Object.entries(groups)) {
+      const [code, typ] = k.split(':');
+      const label = `${countryFlag(code)} ${dnsCountryLabel(code)} — ${typ}`.trim();
+      rows.push([{ text: label, callback_data: `MY_SERVERS_VIEW:${code}:${typ}` }]);
+    }
+    rows.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
+    await tgApi('sendMessage', { chat_id: chatId, text: '🧩 سرورهای من — روی کشور کلیک کنید:', reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data === 'MY_CONFIGS') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const listKey = `user:${uid}:servers`;
+    const list = (await kvGetJson(env, listKey)) || [];
+    if (!list.length) { await tgApi('sendMessage', { chat_id: chatId, text: 'هنوز کانفیگی ندارید.' }); return; }
+    const dnsItems = list.filter(s => (s.type||'dns') === 'dns');
+    const wgItems = list.filter(s => (s.type||'dns') === 'wg');
+    const max = Math.max(dnsItems.length, wgItems.length);
+    const rows = [];
+    for (let i = 0; i < max; i++) {
+      const left = wgItems[i];
+      const right = dnsItems[i];
+      const row = [];
+      // Left: WG
+      if (left) {
+        const label = `${countryFlag(left.country)} ${dnsCountryLabel(left.country)} — WG${left.name ? ` (${left.name})` : ''}`;
+        row.push({ text: label, callback_data: `MYCFG:WG:${left.id}` });
+      } else {
+        row.push({ text: ' ', callback_data: 'NOOP' });
+      }
+      // Right: DNS
+      if (right) {
+        const label = `${countryFlag(right.country)} ${dnsCountryLabel(right.country)} — DNS`;
+        row.push({ text: label, callback_data: `MYCFG:DNS:${right.id}` });
+      } else {
+        row.push({ text: ' ', callback_data: 'NOOP' });
+      }
+      rows.push(row);
+    }
+    rows.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
+    await tgApi('sendMessage', { chat_id: chatId, text: '🧩 کانفیگ‌های من — سمت چپ: WG | سمت راست: DNS', reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith('MYCFG:DNS:')) {
+    const id = data.split(':')[2];
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const listKey = `user:${uid}:servers`;
+    const list = (await kvGetJson(env, listKey)) || [];
+    const item = list.find(s => String(s.id) === String(id) && (s.type||'dns') === 'dns');
+    if (!item) { await tgApi('sendMessage', { chat_id: chatId, text: 'مورد یافت نشد.' }); return; }
+    const text = `${countryFlag(item.country)} DNS — ${dnsCountryLabel(item.country)}\n\nIPv4: \`${item.v4}\`\nIPv6-1: \`${(item.v6&&item.v6[0])||'-'}\`\nIPv6-2: \`${(item.v6&&item.v6[1])||'-'}\``;
+    await tgApi('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown' });
+    return;
+  }
+  if (data.startsWith('MYCFG:WG:')) {
+    await handleWireguardMyConfig(data, { uid, chatId, env, tgApi, tgUpload, kvGetJson, countryFlag, dnsCountryLabel, cbId: cb.id });
+    return;
+  }
+  if (data.startsWith('MY_SERVERS_VIEW:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const [, code, typ] = data.split(':');
+    const listKey = `user:${uid}:servers`;
+    const list = (await kvGetJson(env, listKey)) || [];
+    const filtered = list.filter(s => (s.country||'') === code && ((s.type||'dns').toUpperCase() === typ));
+    if (!filtered.length) {
+      await tgApi('sendMessage', { chat_id: chatId, text: 'موردی یافت نشد.' });
+      return;
+    }
+    const lines = filtered.slice(0, 10).map((it, idx) => {
+      const v6a = (it.v6 && it.v6[0]) ? it.v6[0] : '-';
+      const v6b = (it.v6 && it.v6[1]) ? it.v6[1] : '-';
+      return `#${idx+1}\nIPv4: \`${it.v4}\`\nIPv6-1: \`${v6a}\`\nIPv6-2: \`${v6b}\``;
+    }).join('\n\n');
+    const text = `${countryFlag(code)} ${dnsCountryLabel(code)} — ${typ}\n\n${lines}`;
+    await tgApi('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+      [{ text: '⬅️ بازگشت', callback_data: 'MY_SERVERS' }],
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ] } });
+    return;
+  }
+  if (data === 'SUPREPLY:') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const target = Number(data.split(':')[1]);
+    await setSession(env, uid, { awaiting: `admin_reply:${target}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: `لطفاً پاسخ خود به کاربر ${target} را ارسال کنید.` });
+    return;
+  }
+  if (data === 'BUY_DIAMONDS') {
+    if (await isButtonDisabled(env, 'BUY_DIAMONDS')) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش موقتاً غیرفعال است.' }); return; }
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const info = `💳 خرید سکه
+یک بسته را انتخاب کنید:`;
+    const rows = DIAMOND_PACKAGES.map(p => ([{ text: `${p.diamonds} سکه — ${p.price_toman.toLocaleString('fa-IR')} تومان`, callback_data: `DPKG:${p.id}` }]));
+    rows.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
+    await tgApi('sendMessage', { chat_id: chatId, text: info, reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith('DPKG:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const pkgId = data.split(':')[1];
+    const pkg = getDiamondPackageById(pkgId);
+    const id = await generatePurchaseId(env);
+    const purchase = { id, user_id: uid, diamonds: pkg.diamonds, price_toman: pkg.price_toman, pkg_id: pkg.id, status: 'awaiting_receipt', created_at: now() };
+    await kvPutJson(env, `purchase:${id}`, purchase);
+    // update purchases index (prepend newest)
+    try {
+      const idxKey = 'index:purchases';
+      const idx = (await kvGetJson(env, idxKey)) || [];
+      idx.unshift(id);
+      // keep at most 1000 entries
+      if (idx.length > 1000) idx.length = 1000;
+      await kvPutJson(env, idxKey, idx);
+    } catch (_) {}
+    const txt = `✅ بسته انتخاب شد: ${pkg.diamonds} سکه (${pkg.price_toman.toLocaleString('fa-IR')} تومان)
+شناسه خرید شما: \`${id}\`
+لطفاً مبلغ را به کارت زیر واریز کنید و سپس روی «پرداخت کردم» بزنید:
+
+کارت:
+\`${BANK_CARD_NUMBER}\`
+نام: **${BANK_CARD_NAME}**`;
+    await tgApi('sendMessage', { chat_id: chatId, text: txt, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+      [{ text: '✅ پرداخت کردم', callback_data: `PAID_CONFIRM:${id}` }],
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ] } });
+    return;
+  }
+  if (data.startsWith('PAID_CONFIRM:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const purchaseId = data.split(':')[1];
+    const pKey = `purchase:${purchaseId}`;
+    const purchase = await kvGetJson(env, pKey);
+    if (!purchase || purchase.user_id !== uid || purchase.status !== 'awaiting_receipt') {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ درخواست خرید نامعتبر یا منقضی است.' });
+      return;
+    }
+    await setSession(env, uid, { awaiting: `payment_receipt:${purchaseId}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: `شناسه خرید شما: \`${purchaseId}\`\nلطفاً عکس رسید پرداخت را ارسال کنید.`, parse_mode: 'Markdown' });
+    return;
+  }
+  if (data === 'PAID_CONFIRM') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    // legacy path disabled; now user must select a package first
+    await tgApi('sendMessage', { chat_id: chatId, text: 'لطفاً ابتدا یک بسته را انتخاب کنید.' });
+    return;
+  }
+  if (data === 'UPLOAD_HELP') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'راهنمای آپلود' });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'برای آپلود، می‌توانید متن، سند، عکس، ویدیو، صدا یا ویس ارسال کنید. پس از آپلود، لینک اختصاصی دریافت می‌کنید.' });
+    return;
+  }
+  if (data === 'ADMIN:UPLOAD' && isAdmin(uid)) {
+    // Show categorized upload options
+    await setSession(env, uid, {});
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const kb = { inline_keyboard: [
+      [{ text: '📝 متن', callback_data: 'UPLOAD_CAT:TEXT' }, { text: '🔗 لینک', callback_data: 'UPLOAD_CAT:LINK' }],
+      [{ text: '📄 فایل', callback_data: 'UPLOAD_CAT:FILE' }, { text: '🖼 سایر رسانه', callback_data: 'UPLOAD_CAT:OTHER' }],
+      [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PANEL' }]
+    ] };
+    await tgApi('sendMessage', { chat_id: chatId, text: 'یک دسته آپلود را انتخاب کنید:', reply_markup: kb });
+    return;
+  }
+  if (data.startsWith('UPLOAD_CAT:') && isAdmin(uid)) {
+    const cat = data.split(':')[1];
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    if (cat === 'TEXT') {
+      await setSession(env, uid, { awaiting: 'upload_wait_text' });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'متن خود را ارسال کنید:' });
+    } else if (cat === 'LINK') {
+      await setSession(env, uid, { awaiting: 'upload_wait_link' });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'لینک خود را ارسال کنید (http/https):' });
+    } else if (cat === 'FILE') {
+      await setSession(env, uid, { awaiting: 'upload_wait_file' });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'فایل (document) خود را ارسال کنید.' });
+    } else {
+      await setSession(env, uid, { awaiting: 'upload_wait' });
+      await tgApi('sendMessage', { chat_id: chatId, text: 'یکی از انواع رسانه (photo/video/audio/voice) را ارسال کنید.' });
+    }
+    return;
+  }
+  if (data === 'CHECK_JOIN') {
+    const ok = await isUserJoinedAllRequiredChannels(env, uid);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    if (!ok) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '❌ هنوز عضو تمام کانال‌های الزامی نیستید.' });
+      return;
+    }
+    // mark user joined
+    const uKey = `user:${uid}`;
+    const uMeta = (await kvGetJson(env, uKey)) || { id: uid };
+    uMeta.joined = true;
+    await kvPutJson(env, uKey, uMeta);
+
+    // credit referrer (once) if pending or recorded
+    const s = await getSession(env, uid);
+    const pendingRef = s?.pending_download?.ref || s?.pending_ref || uMeta.referred_by;
+    const refIdNum = Number(pendingRef);
+    if (Number.isFinite(refIdNum) && refIdNum !== Number(uid) && !uMeta.ref_credited) {
+      const refUser = (await kvGetJson(env, `user:${refIdNum}`)) || null;
+      if (refUser) {
+          refUser.diamonds = (refUser.diamonds || 0) + 1;
+          refUser.referrals = (refUser.referrals || 0) + 1;
+        await kvPutJson(env, `user:${refIdNum}`, refUser);
+        uMeta.ref_credited = true;
+        uMeta.referred_by = uMeta.referred_by || refIdNum;
+        await kvPutJson(env, uKey, uMeta);
+        // track weekly referral for missions (credit to referrer)
+        const wk = weekKey();
+        const rk = `ref_week:${refIdNum}:${wk}`;
+        const rec = (await kvGetJson(env, rk)) || { count: 0 };
+        rec.count = (rec.count || 0) + 1;
+        await kvPutJson(env, rk, rec);
+        await tgApi('sendMessage', { chat_id: refIdNum, text: '🎉 یک الماس بابت معرفی کاربر جدید دریافت کردید.' });
+      }
+    }
+
+    // continue any pending download automatically
+    const pendingToken = s?.pending_download?.token;
+    const pendingDeepRef = s?.pending_download?.ref || '';
+    if (pendingToken) {
+      // clear pending markers but keep other session state
+      const nextSession = { ...(s || {}) };
+      delete nextSession.pending_download;
+      delete nextSession.pending_ref;
+      await setSession(env, uid, nextSession);
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ عضویت شما تایید شد. ادامه عملیات...' });
+      await handleBotDownload(env, uid, chatId, pendingToken, pendingDeepRef);
+      return;
+    }
+
+    await tgApi('sendMessage', { chat_id: chatId, text: '✅ عضویت شما تایید شد.' });
+    return;
+  }
+  if (data === 'PROFILE') {
+    const user = (await kvGetJson(env, `user:${uid}`)) || {};
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    if (isAdmin(uid)) {
+      const users = (await kvGetJson(env, 'index:users')) || [];
+      const userCount = users.length;
+      let totalDownloads = 0; let fileCount = 0;
+      for (const u of users.slice(0, 100)) {
+        const list = (await kvGetJson(env, `uploader:${u}`)) || [];
+        fileCount += list.length;
+        for (const t of list) {
+          const f = await kvGetJson(env, `file:${t}`);
+          if (f && f.downloads) totalDownloads += f.downloads;
+        }
+      }
+      await tgApi('sendMessage', { chat_id: chatId, text: `📊 پروفایل شما:\n\n👤 آی‌دی: ${uid}\n🏷 یوزرنیم: ${user.username||'-'}\n💎 الماس: ${user.diamonds||0}\n📈 معرفی‌ها: ${user.referrals||0}\n📅 عضویت: ${formatDate(user.created_at||0)}\n\n📈 آمار ربات:\n👥 کاربران: ${userCount}\n📁 فایل‌ها: ${fileCount}\n📥 دانلودها: ${totalDownloads}` });
+    } else {
+      // Show missions progress if available and present support/ticket actions
+      const progress = await getUserMissionProgress(env, uid);
+      const missionsActive = (await kvGetJson(env, 'missions:index')) || [];
+      const mText = missionsActive.length ? `\n\n📆 ماموریت‌های فعال: ${missionsActive.length}\n✅ پیشرفت شما: ${progress.completed||0}/${missionsActive.length}` : '';
+      const text = `📊 پروفایل شما:\n\n👤 آی‌دی: ${uid}\n🏷 یوزرنیم: ${user.username||'-'}\n💎 الماس: ${user.diamonds||0}\n📈 معرفی‌ها: ${user.referrals||0}\n📅 عضویت: ${formatDate(user.created_at||0)}${mText}`;
+      const reply_markup = { inline_keyboard: [
+        [{ text: '🧾 ثبت تیکت جدید', callback_data: 'TICKET:NEW' }],
+        [{ text: '📨 تیکت‌های من', callback_data: 'TICKET:MY' }],
+        [{ text: '💸 انتقال موجودی', callback_data: 'BAL:START' }],
+        [{ text: '🆘 پشتیبانی', callback_data: 'SUPPORT' }],
+        [{ text: '🏠 منو', callback_data: 'MENU' }]
+      ] };
+      await tgApi('sendMessage', { chat_id: chatId, text, reply_markup });
+    }
+    return;
+  }
+  if (data === 'GET_BY_TOKEN') {
+    if (await isButtonDisabled(env, 'GET_BY_TOKEN')) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش موقتاً غیرفعال است.' }); return; }
+    await setSession(env, uid, { awaiting: 'get_by_token' });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'توکن فایل را ارسال کنید:' });
+    return;
+  }
+  if (data === 'SUB:REFERRAL') {
+    if (await isButtonDisabled(env, 'SUB:REFERRAL')) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش موقتاً غیرفعال است.' }); return; }
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const rows = [
+      [{ text: 'دریافت لینک اختصاصی', callback_data: 'REFERRAL' }],
+      [{ text: '⬅️ بازگشت', callback_data: 'MENU' }]
+    ];
+    await tgApi('sendMessage', { chat_id: chatId, text: '👥 زیرمجموعه گیری:', reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data === 'SUB:ACCOUNT') {
+    if (await isButtonDisabled(env, 'SUB:ACCOUNT')) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش موقتاً غیرفعال است.' }); return; }
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    // Show profile directly without extra buttons
+    const user = (await kvGetJson(env, `user:${uid}`)) || {};
+    const progress = await getUserMissionProgress(env, uid);
+    const missionsActive = (await kvGetJson(env, 'missions:index')) || [];
+    const mText = missionsActive.length ? `\n\n📆 ماموریت‌های فعال: ${missionsActive.length}\n✅ پیشرفت شما: ${progress.completed||0}/${missionsActive.length}` : '';
+    const text = `📊 پروفایل شما:\n\n👤 آی‌دی: ${uid}\n🏷 یوزرنیم: ${user.username||'-'}\n💎 الماس: ${user.diamonds||0}\n📈 معرفی‌ها: ${user.referrals||0}\n📅 عضویت: ${formatDate(user.created_at||0)}${mText}`;
+    const reply_markup = { inline_keyboard: [
+      [
+        { text: '🧾 ثبت تیکت جدید', callback_data: 'TICKET:NEW' },
+        { text: '📨 تیکت‌های من', callback_data: 'TICKET:MY' }
+      ],
+      [
+        { text: '🧩 کانفیگ‌های من', callback_data: 'MY_CONFIGS' },
+        { text: '💸 انتقال موجودی', callback_data: 'BAL:START' }
+      ],
+      [
+        { text: '🏠 منو', callback_data: 'MENU' },
+        { text: '🆘 پشتیبانی', callback_data: 'SUPPORT' }
+      ]
+    ] };
+    await tgApi('sendMessage', { chat_id: chatId, text, reply_markup });
+    return;
+  }
+  
+  // ===== Balance transfer flow (callbacks)
+  if (data === 'BAL:START') {
+    await setSession(env, uid, { awaiting: 'bal:to' });
+    try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); } catch (_) {}
+    await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی عددی گیرنده را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (data.startsWith('BAL:CONFIRM:')) {
+    const [, , toIdStr, amountStr] = data.split(':');
+    const toId = Number(toIdStr);
+    const amount = Math.floor(Number(amountStr));
+    if (!Number.isFinite(toId) || !Number.isFinite(amount)) { try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'نامعتبر' }); } catch (_) {} return; }
+    if (amount < 2 || amount > 50) { try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'بازه انتقال 2 تا 50 الماس است' }); } catch (_) {} return; }
+    const fromKey = `user:${uid}`;
+    const toKey = `user:${toId}`;
+    const fromUser = (await kvGetJson(env, fromKey)) || { id: uid, diamonds: 0 };
+    const toUser = (await kvGetJson(env, toKey)) || { id: toId, diamonds: 0 };
+    if (toId === uid) { try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'نامعتبر' }); } catch (_) {} return; }
+    if ((fromUser.diamonds || 0) < amount) { try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'الماس کافی نیست' }); } catch (_) {} return; }
+    // ensure destination exists in index; if not, create entry lazily
+    const usersIndex = (await kvGetJson(env, 'index:users')) || [];
+    if (!usersIndex.includes(toId)) {
+      usersIndex.push(toId);
+      await kvPutJson(env, 'index:users', usersIndex);
+      const existing = await kvGetJson(env, toKey);
+      if (!existing) { await kvPutJson(env, toKey, toUser); }
+    }
+    fromUser.diamonds = (fromUser.diamonds || 0) - amount;
+    toUser.diamonds = (toUser.diamonds || 0) + amount;
+    await kvPutJson(env, fromKey, fromUser);
+    await kvPutJson(env, toKey, toUser);
+    try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'انجام شد' }); } catch (_) {}
+    await tgApi('sendMessage', { chat_id: chatId, text: `✅ انتقال انجام شد. ${amount} الماس به کاربر ${toId} منتقل شد.` });
+    try { await tgApi('sendMessage', { chat_id: toId, text: `💸 ${amount} الماس از سوی کاربر ${uid} به حساب شما واریز شد.` }); } catch(_) {}
+    return;
+  }
+  // ===== Tickets: User actions
+  if (data === 'TICKET:NEW') {
+    await setSession(env, uid, { awaiting: 'ticket:new:category' });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const categories = ['عمومی', 'پرداخت', 'فنی'];
+    await tgApi('sendMessage', { chat_id: chatId, text: 'دسته تیکت را انتخاب یا تایپ کنید:', reply_markup: { inline_keyboard: [
+      ...categories.map(c => ([{ text: c, callback_data: `TKT:CAT:${encodeURIComponent(c)}` }])),
+      [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
+    ] } });
+    return;
+  }
+  if (data.startsWith('TKT:CAT:')) {
+    const cat = decodeURIComponent(data.split(':')[2]);
+    await setSession(env, uid, { awaiting: `ticket:new:desc:${btoa(encodeURIComponent(JSON.stringify({ category: cat })) )}` });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: `دسته انتخاب شد: ${cat}\nاکنون شرح تیکت را وارد کنید:` });
+    return;
+  }
+  if (data.startsWith('TKT:SUBMIT:')) {
+    const payload = data.split(':')[2];
+    let obj = null;
+    try { obj = JSON.parse(decodeURIComponent(atob(payload))); } catch (_) {}
+    if (!obj || !obj.category || !obj.desc) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'نامعتبر' }); return; }
+    const userKey = `user:${uid}`;
+    const u = (await kvGetJson(env, userKey)) || { id: uid };
+    const created = await createTicket(env, {
+      user_id: uid,
+      username: u.username || null,
+      category: obj.category,
+      subject: '-',
+      desc: obj.desc
+    });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: `✅ تیکت شما ثبت شد. شناسه: #${created.id}` });
+    try {
+      const admins = await getAdminIds(env);
+      const notice = `🧾 تیکت جدید #${created.id} از ${uid}${u.username ? ` (@${u.username})` : ''}\nدسته: ${created.category}`;
+      for (const aid of admins) { try { await tgApi('sendMessage', { chat_id: aid, text: notice }); } catch (_) {} }
+    } catch (_) {}
+    return;
+  }
+  if (data === 'TICKET:MY') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const list = await listUserTickets(env, uid, { limit: 10 });
+    const lines = list.length ? list.map(t => `#${t.id} | ${t.status || 'open'} | ${escapeHtml(t.subject || '-')}`).join('\n') : '—';
+    const rows = [
+      ...list.map(t => ([{ text: `#${t.id}`, callback_data: `TKT:VIEW:${t.id}` }])),
+      [{ text: '🧾 ثبت تیکت جدید', callback_data: 'TICKET:NEW' }],
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ];
+    await tgApi('sendMessage', { chat_id: chatId, text: `📨 تیکت‌های من\n\n${lines}` , reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith('TKT:VIEW:')) {
+    const id = data.split(':')[2];
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const t = await getTicket(env, id);
+    if (!t || String(t.user_id) !== String(uid)) { await tgApi('sendMessage', { chat_id: chatId, text: 'تیکت یافت نشد.' }); return; }
+    const msgs = await getTicketMessages(env, id, 20);
+    const history = msgs.map(m => `${m.from === 'admin' ? 'ادمین' : 'شما'} (${formatDate(m.at)}):\n${m.text}`).join('\n\n') || '—';
+    const kb = { inline_keyboard: [
+      ...(t.status !== 'closed' ? [[{ text: '✍️ ارسال پیام در این تیکت', callback_data: `TKT:REPLY:${t.id}` }]] : []),
+      [{ text: '⬅️ بازگشت', callback_data: 'TICKET:MY' }]
+    ] };
+    await tgApi('sendMessage', { chat_id: chatId, text: `#${t.id} | ${t.status || 'open'}\nموضوع: ${t.subject || '-'}\nدسته: ${t.category || '-'}\n\nگفت‌وگو:\n${history}`, reply_markup: kb });
+    return;
+  }
+  if (data.startsWith('TKT:REPLY:')) {
+    const id = data.split(':')[2];
+    const t = await getTicket(env, id);
+    if (!t || String(t.user_id) !== String(uid) || t.status === 'closed') { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'نامعتبر' }); return; }
+    await setSession(env, uid, { awaiting: `tkt_user_reply:${id}` });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'پیام خود را برای افزودن به این تیکت ارسال کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (data === 'MISSIONS') {
+    if (await isButtonDisabled(env, 'MISSIONS')) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش موقتاً غیرفعال است.' }); return; }
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const { text, reply_markup } = await buildMissionsView(env, uid);
+    await tgApi('sendMessage', { chat_id: chatId, text, reply_markup });
+    // If there is an active weekly invite mission, show progress shortcut
+    const missions = await listMissions(env);
+    const inviteM = missions.find(m => m.enabled && m.type === 'invite');
+    if (inviteM) {
+      const wk = weekKey();
+      const rk = `ref_week:${uid}:${wk}`;
+      const rec = (await kvGetJson(env, rk)) || { count: 0 };
+      const needed = Number(inviteM.config?.needed || 0);
+      const left = Math.max(0, needed - (rec.count || 0));
+      await tgApi('sendMessage', { chat_id: chatId, text: `👥 ماموریت دعوت این هفته: دعوت ${needed} نفر\nپیشرفت شما: ${rec.count||0}/${needed}${left>0 ? `\nبرای تکمیل ماموریت ${left} نفر دیگر باقی مانده است.` : ''}` });
+      if (left <= 0) {
+        // auto-complete if not done
+        await completeMissionIfEligible(env, uid, inviteM);
+      }
+    }
+    return;
+  }
+  // Mission interactions for quiz and weekly question
+  if (data.startsWith('MIS:QUIZ:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const id = data.split(':')[2];
+    const m = await kvGetJson(env, `mission:${id}`);
+    if (!m || !m.enabled || m.type !== 'quiz') { await tgApi('sendMessage', { chat_id: chatId, text: 'ماموریت یافت نشد.' }); return; }
+    const prog = await getUserMissionProgress(env, uid);
+    const markKey = `${m.id}:${weekKey()}`; // weekly quiz default
+    if ((prog.map||{})[markKey]) { await tgApi('sendMessage', { chat_id: chatId, text: 'شما قبلاً به این کوییز پاسخ داده‌اید.' }); return; }
+    const q = m.config?.question || '-';
+    const options = Array.isArray(m.config?.options) ? m.config.options : [];
+    const note = 'توجه: هر کاربر فقط یک بار می‌تواند پاسخ دهد.';
+    if (options.length >= 2) {
+      const rows = options.map((opt, idx) => ([{ text: opt, callback_data: `MIS:QUIZ_ANS:${m.id}:${idx}` }]));
+      rows.push([{ text: '❌ انصراف', callback_data: 'CANCEL' }]);
+      await tgApi('sendMessage', { chat_id: chatId, text: `🎮 کوییز هفتگی:\n${q}\n\n${note}`, reply_markup: { inline_keyboard: rows } });
+    } else {
+      await setSession(env, uid, { awaiting: `mis_quiz_answer:${id}` });
+      await tgApi('sendMessage', { chat_id: chatId, text: `🎮 کوییز هفتگی:\n${q}\n\n${note}\nپاسخ خود را ارسال کنید:`, reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    }
+    return;
+  }
+  if (data.startsWith('MIS:QUIZ_ANS:')) {
+    const [, , id, idxStr] = data.split(':');
+    const m = await kvGetJson(env, `mission:${id}`);
+    if (!m || !m.enabled || m.type !== 'quiz') { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'نامعتبر' }); return; }
+    const idx = Number(idxStr);
+    const options = Array.isArray(m.config?.options) ? m.config.options : [];
+    if (!Number.isFinite(idx) || idx < 0 || idx >= options.length) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'نامعتبر' }); return; }
+    const prog = await getUserMissionProgress(env, uid);
+    const markKey = `${m.id}:${weekKey()}`; // weekly quiz
+    if ((prog.map||{})[markKey]) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'قبلاً پاسخ داده‌اید' }); return; }
+    const ok = idx === Number((m.config?.correctIndex ?? -1));
+    if (ok) {
+      await completeMissionIfEligible(env, uid, m);
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '✅ صحیح' });
+      await tgApi('sendMessage', { chat_id: chatId, text: '✅ پاسخ صحیح بود و جایزه برای شما منظور شد.' });
+    } else {
+      // mark attempt without reward
+      prog.map = prog.map || {};
+      prog.map[markKey] = now();
+      await setUserMissionProgress(env, uid, prog);
+      await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: '❌ نادرست' });
+      await tgApi('sendMessage', { chat_id: chatId, text: '❌ پاسخ شما نادرست بود. امکان پاسخ مجدد وجود ندارد.' });
+    }
+    return;
+  }
+  if (data.startsWith('MIS:Q:')) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const id = data.split(':')[2];
+    const m = await kvGetJson(env, `mission:${id}`);
+    if (!m || !m.enabled || m.type !== 'question') { await tgApi('sendMessage', { chat_id: chatId, text: 'ماموریت یافت نشد.' }); return; }
+    const q = m.config?.question || '-';
+    await setSession(env, uid, { awaiting: `mis_question_answer:${id}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: `❓ سوال هفتگی:\n${q}\n\nتوجه: هر کاربر فقط یک بار می‌تواند پاسخ دهد.\nپاسخ خود را ارسال کنید:`, reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (data === 'WEEKLY_CHECKIN') {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    // strict 7-day cooldown per user
+    const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+    const nowTs = now();
+    const prog = await getUserMissionProgress(env, uid);
+    const lastTs = Number(prog.weekly_last_ts || 0);
+    const formatDurationFull = (ms) => {
+      const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+      const days = Math.floor(totalSeconds / 86400);
+      const hours = Math.floor((totalSeconds % 86400) / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      return `${days} روز و ${hours} ساعت و ${minutes} دقیقه و ${seconds} ثانیه`;
+    };
+    if (lastTs && (nowTs - lastTs) < WEEK_MS) {
+      const remain = WEEK_MS - (nowTs - lastTs);
+      const human = formatDurationFull(remain);
+      await tgApi('sendMessage', { chat_id: chatId, text: `⏳ هنوز زود است. زمان باقی‌مانده تا دریافت بعدی: ${human}` });
+      return;
+    }
+    // mark last claim and keep a week marker for compatibility
+    prog.map = prog.map || {};
+    prog.map[`checkin:${weekKey()}`] = nowTs;
+    prog.weekly_last_ts = nowTs;
+    await setUserMissionProgress(env, uid, prog);
+
+    const uKey = `user:${uid}`;
+    const user = (await kvGetJson(env, uKey)) || { id: uid, diamonds: 0 };
+    const reward = 2; // weekly reward amount
+    user.diamonds = (user.diamonds || 0) + reward;
+    await kvPutJson(env, uKey, user);
+    const humanNext = formatDurationFull(WEEK_MS);
+    await tgApi('sendMessage', { chat_id: chatId, text: `✅ پاداش هفتگی دریافت شد. ${reward} الماس دریافت کردید.\n⏱ زمان تا دریافت بعدی: ${humanNext}` });
+    return;
+  }
+  if (data === 'LOTTERY') {
+    if (await isButtonDisabled(env, 'LOTTERY')) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); await tgApi('sendMessage', { chat_id: chatId, text: 'این بخش موقتاً غیرفعال است.' }); return; }
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const cfg = await getLotteryConfig(env);
+    const enrolled = await isUserEnrolledToday(env, uid);
+    const pool = (await kvGetJson(env, `lottery:pool:${dayKey()}`)) || [];
+    const poolCount = pool.length;
+    const kbd = { inline_keyboard: [
+      ...(cfg.enabled && !enrolled ? [[{ text: '✨ ثبت‌نام در قرعه‌کشی امروز', callback_data: 'LOTTERY:ENROLL' }]] : []),
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ] };
+    const txt = cfg.enabled
+    ? `🎟 قرعه‌کشی فعال است. برندگان: ${cfg.winners||0} | جایزه: ${cfg.reward_diamonds||0} الماس\n👥 ثبت‌نام امروز: ${poolCount} نفر${enrolled ? '\nشما برای امروز ثبت‌نام کرده‌اید.' : ''}`
+      : `🎟 قرعه‌کشی در حال حاضر غیرفعال است.\n👥 ثبت‌نام امروز: ${poolCount} نفر`;
+    await tgApi('sendMessage', { chat_id: chatId, text: txt, reply_markup: kbd });
+    return;
+  }
+  if (data === 'LOTTERY:ENROLL') {
+    const cfg = await getLotteryConfig(env);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    if (!cfg.enabled) { await tgApi('sendMessage', { chat_id: chatId, text: 'در حال حاضر فعال نیست.' }); return; }
+    const ok = await userEnrollToday(env, uid);
+    await tgApi('sendMessage', { chat_id: chatId, text: ok ? '✅ ثبت‌نام شما برای امروز انجام شد.' : 'قبلا ثبت‌نام کرده‌اید.' });
+    return;
+  }
+  if (data === 'REDEEM_GIFT') {
+    await setSession(env, uid, { awaiting: 'redeem_gift' });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: '🎁 کد هدیه را وارد کنید:' });
+    return;
+  }
+  if (data === 'REFERRAL') {
+    const botUsername = await getBotUsername(env);
+    const refLink = botUsername ? `https://t.me/${botUsername}?start=${uid}` : '—';
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: `👥 زیرمجموعه گیری:\n\nبا اشتراک‌گذاری لینک زیر به ازای هر کاربر فعال، الماس دریافت می‌کنید.\n\n${refLink}` });
+    return;
+  }
+  if (data.startsWith('MYFILES:')) {
+    const page = parseInt(data.split(':')[1] || '0', 10) || 0;
+    const built = await buildMyFilesKeyboard(env, uid, page);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: built.text, reply_markup: built.reply_markup });
+    return;
+  }
+  if (data.startsWith('DETAILS:')) {
+    const parts = data.split(':');
+    const token = parts[1];
+    const page = parseInt(parts[2] || '0', 10) || 0;
+    if (!isValidTokenFormat(token)) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'توکن نامعتبر' }); return; }
+    const f = await kvGetJson(env, `file:${token}`);
+    if (!f) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'یافت نشد' }); return; }
+    const link = await getShareLink(env, token);
+    const details = `📄 جزئیات فایل:
+نام: ${f.name || '-'}
+توکن: \`${token}\`
+حجم: ${formatFileSize(f.size||0)}
+هزینه (الماس): ${f.cost_points||0}
+دانلود: ${f.downloads||0}
+آخرین دانلود: ${f.last_download ? formatDate(f.last_download) : '-'}
+وضعیت: ${f.disabled ? '🔴 غیرفعال' : '🟢 فعال'}
+ محدودیت دانلود: ${(f.max_downloads||0) > 0 ? f.max_downloads : 'نامحدود'}
+ حذف پس از اتمام: ${f.delete_on_limit ? 'بله' : 'خیر'}
+لینک اشتراک: \`${link}\``;
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const baseRow = [{ text: '📥 دریافت', callback_data: `SEND:${token}` }, { text: '🔗 کپی لینک', callback_data: `LINK:${token}` }];
+    const adminExtras = isAdmin(uid) ? [
+      { text: '✏️ ویرایش نام', callback_data: `RENAME:${token}` },
+      { text: '♻️ جایگزینی', callback_data: `REPLACE:${token}` },
+      { text: '🔒 محدودیت دانلود', callback_data: `LIMIT:${token}` }
+    ] : [{ text: '✏️ تغییر نام', callback_data: `RENAME:${token}` }];
+    const rows = [baseRow, adminExtras, [{ text: '⬅️ بازگشت', callback_data: `MYFILES:${page}` }]];
+    await tgApi('sendMessage', { chat_id: chatId, text: details, parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (data.startsWith('LINK:')) {
+    const token = data.split(':')[1];
+    if (!isValidTokenFormat(token)) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'توکن نامعتبر' }); return; }
+    const file = await kvGetJson(env, `file:${token}`);
+    if (!file) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'یافت نشد' }); return; }
+    const botUsername = await getBotUsername(env);
+    const link = botUsername ? `https://t.me/${botUsername}?start=d_${token}` : `${domainFromWebhook()}/f/${token}`;
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'لینک ارسال شد' });
+    await tgApi('sendMessage', { chat_id: chatId, text: `🔗 لینک دانلود:\n${link}\n\nبرای کسب الماس لینک را از داخل ربات برای دیگران ارسال کنید.` });
+    return;
+  }
+  if (data.startsWith('RENAME:')) {
+    const token = data.split(':')[1];
+    if (!isValidTokenFormat(token)) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'توکن نامعتبر' }); return; }
+    await setSession(env, uid, { awaiting: `rename:${token}` });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'نام جدید را ارسال کنید:' });
+    return;
+  }
+  if (data.startsWith('SEND:')) {
+    const token = data.split(':')[1];
+    const file = await kvGetJson(env, `file:${token}`);
+    if (!file) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'یافت نشد' }); return; }
+    // Only allow owner or admin to fetch directly inside the bot
+    // For regular users, go through handleBotDownload flow (membership + cost)
+    if (!isAdmin(uid)) { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); await handleBotDownload(env, uid, chatId, token, ''); return; }
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await deliverStoredContent(chatId, file);
+    // update download stats
+    file.downloads = (file.downloads || 0) + 1; file.last_download = now();
+    try { await addFileTaker(env, token, uid); } catch (_) {}
+    await kvPutJson(env, `file:${token}`, file);
+    return;
+  }
+  
+  // Handle confirmation to spend diamonds and receive the file
+  if (data.startsWith('CONFIRM_SPEND:')) {
+    try { await tgApi('answerCallbackQuery', { callback_query_id: cb.id }); } catch (_) {}
+    const parts = data.split(':');
+    const token = parts[1] || '';
+    const needed = Number(parts[2] || '0') || 0;
+    const ref = parts[3] || '';
+    if (!isValidTokenFormat(token)) { await tgApi('sendMessage', { chat_id: chatId, text: 'توکن نامعتبر' }); return; }
+    const file = await kvGetJson(env, `file:${token}`);
+    if (!file) { await tgApi('sendMessage', { chat_id: chatId, text: 'فایل یافت نشد' }); return; }
+
+    // Validate session intent to prevent accidental or forged clicks
+    const session = await getSession(env, uid);
+    const expected = `confirm_spend:${token}:${needed}:${ref||''}`;
+    if (!session.awaiting || !String(session.awaiting).startsWith(`confirm_spend:${token}:`)) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ این درخواست معتبر نیست یا منقضی شده است.' });
+      return;
+    }
+
+    // Re-check service/update/disabled status
+    const enabled = (await kvGetJson(env, 'bot:enabled')) ?? true;
+    const updateMode = (await kvGetJson(env, 'bot:update_mode')) || false;
+    if (!enabled) { await tgApi('sendMessage', { chat_id: chatId, text: 'سرویس موقتا غیرفعال است' }); return; }
+    if (updateMode && !isAdmin(uid)) { await tgApi('sendMessage', { chat_id: chatId, text: '🔧 ربات در حال بروزرسانی است. لطفاً دقایقی دیگر مجدداً تلاش کنید.' }); return; }
+    if (file.disabled) { await tgApi('sendMessage', { chat_id: chatId, text: 'فایل توسط مالک/ادمین غیرفعال شده است' }); return; }
+
+    // Enforce per-file download limit
+    if ((file.max_downloads || 0) > 0 && (file.downloads || 0) >= file.max_downloads) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ ظرفیت دانلود این فایل به پایان رسیده است.' });
+      return;
+    }
+
+    // Enforce required channels
+    const req = await getRequiredChannels(env);
+    if (req.length && !(await isUserJoinedAllRequiredChannels(env, uid))) {
+      await presentJoinPrompt(env, chatId);
+      return;
+    }
+
+    // Check and deduct diamonds
+    const uKey = `user:${uid}`;
+    const user = (await kvGetJson(env, uKey)) || { id: uid, diamonds: 0 };
+    if (user.frozen && !isAdmin(uid)) { await tgApi('sendMessage', { chat_id: chatId, text: '⛔️ موجودی شما فریز است.' }); return; }
+    const cost = Number(file.cost_points || 0);
+    if (cost !== needed) {
+      // If cost changed since prompt, ask user to restart
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: 'مبلغ تغییر کرده است. دوباره تلاش کنید.' });
+      return;
+    }
+    if ((user.diamonds || 0) < cost) {
+      await setSession(env, uid, {});
+      await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ الماس کافی ندارید. نیاز: ${cost} | الماس شما: ${user.diamonds||0}` });
+      return;
+    }
+
+    // Daily usage limit (if applicable) before spending
+    const settings = await getSettings(env);
+    const limit = settings.daily_limit || 0;
+    if (limit > 0 && !isAdmin(uid)) {
+      const dk = `usage:${uid}:${dayKey()}`;
+      const used = (await kvGetJson(env, dk)) || { count: 0 };
+      if ((used.count || 0) >= limit) {
+        await tgApi('sendMessage', { chat_id: chatId, text: `به سقف روزانه استفاده (${limit}) رسیده‌اید.` });
+        return;
+      }
+    }
+
+    // Deduct and persist
+    user.diamonds = (user.diamonds || 0) - cost;
+    await kvPutJson(env, uKey, user);
+    await setSession(env, uid, {});
+
+    // Optional referral credit on first successful paid download
+    if (ref && String(ref) !== String(file.owner)) {
+      const currentUser = (await kvGetJson(env, `user:${uid}`)) || { id: uid };
+      if (!currentUser.ref_credited) {
+        const refUser = (await kvGetJson(env, `user:${ref}`)) || null;
+        if (refUser) {
+          refUser.diamonds = (refUser.diamonds || 0) + 1;
+          refUser.referrals = (refUser.referrals || 0) + 1;
+          await kvPutJson(env, `user:${ref}`, refUser);
+          currentUser.ref_credited = true;
+          currentUser.referred_by = currentUser.referred_by || Number(ref);
+          await kvPutJson(env, `user:${uid}`, currentUser);
+          try { await tgApi('sendMessage', { chat_id: Number(ref), text: '🎉 یک الماس بابت معرفی دریافت کردید.' }); } catch (_) {}
+        }
+      }
+    }
+
+    // Deliver and update stats
+    await deliverStoredContent(chatId, file);
+    file.downloads = (file.downloads || 0) + 1; file.last_download = now();
+    try { await addFileTaker(env, token, uid); } catch (_) {}
+    await kvPutJson(env, `file:${token}`, file);
+
+    // If reached limit after increment and flagged, delete
+    if ((file.max_downloads || 0) > 0 && (file.downloads || 0) >= file.max_downloads && file.delete_on_limit) {
+      try {
+        const upKey = `uploader:${file.owner}`;
+        const upList = (await kvGetJson(env, upKey)) || [];
+        await kvPutJson(env, upKey, upList.filter(t => t !== token));
+        await kvDelete(env, `file:${token}`);
+      } catch (_) {}
+    }
+
+    // Increase daily usage count after success
+    if ((settings.daily_limit || 0) > 0 && !isAdmin(uid)) {
+      const dk = `usage:${uid}:${dayKey()}`;
+      const used = (await kvGetJson(env, dk)) || { count: 0 };
+      used.count = (used.count || 0) + 1;
+      await kvPutJson(env, dk, used);
+    }
+    return;
   }
   
   if (data.startsWith('COST:')) {
@@ -1730,7 +3487,7 @@ async function onMessage(msg, env) {
   if (data === 'ADMIN:TAKEPOINTS' && isAdmin(uid)) {
     await setSession(env, uid, { awaiting: 'takepoints_uid' });
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
-    await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی عددی کاربر برای کسر سکه را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی عددی کاربر برای کسر الماس را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
     return;
   }
   if (data === 'ADMIN:FREEZE' && isAdmin(uid)) {
@@ -1898,8 +3655,9 @@ ${link}
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     const top = await computeTopReferrers(env, 10);
     const text = top.length
-      ? '🏷 معرفین برتر (۱۰ نفر):\n' + top.map((u, i) => `${i+1}. ${u.id} ${u.username ? `(@${u.username})` : ''} — معرفی‌ها: ${u.referrals||0} | سکه: ${u.diamonds||0}`).join('\n')
+      ? '🏷 معرفین برتر (۱۰ نفر):\n' + top.map((u, i) => `${i + 1}. ${u.id} ${u.username ? `(@${u.username})` : ''} — معرفی‌ها: ${u.referrals || 0} | سکه: ${u.diamonds || 0}`).join('\n')
       : '— هیچ داده‌ای یافت نشد.';
+
     const kb = { inline_keyboard: [
       [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:STATS' }]
     ] };
@@ -1910,8 +3668,9 @@ ${link}
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     const top = await computeTopPurchasers(env, 10);
     const text = top.length
-      ? '💰 خریداران برتر (۱۰ نفر):\n' + top.map((u, i) => `${i+1}. ${u.user_id} ${u.username ? `(@${u.username})` : ''} — خرید: ${u.count||0} | سکه: ${u.diamonds||0} | مبلغ: ${(u.amount||0).toLocaleString('fa-IR')}ت`).join('\n')
+      ? '💰 خریداران برتر (۱۰ نفر):\n' + top.map((u, i) => `${i + 1}. ${u.user_id} ${u.username ? `(@${u.username})` : ''} — خرید: ${u.count || 0} | سکه: ${u.diamonds || 0} | مبلغ: ${(u.amount || 0).toLocaleString('fa-IR')}ت`).join('\n')
       : '— هیچ داده‌ای یافت نشد.';
+
     const kb = { inline_keyboard: [
       [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:STATS' }]
     ] };
@@ -1928,7 +3687,7 @@ ${link}
       const rec = (await kvGetJson(env, `points_week:${u}:${wk}`)) || { points: 0 };
       if ((rec.points || 0) > topPts) { topPts = rec.points || 0; topUser = u; }
     }
-    const highestWeekly = topUser ? `${topUser} — ${topPts} سکه` : '—';
+    const highestWeekly = topUser ? `${topUser} — ${topPts} الماس` : '—';
     const text = `📊 آمار جزئی\n\n🏆 بیشترین امتیاز کسب‌شده در این هفته: ${highestWeekly}\n\nدکمه‌های بیشتر:`;
     const rows = [
       [{ text: '🏆 بیشترین امتیاز هفته (تازه‌سازی)', callback_data: 'ADMIN:STATS:DETAILS' }],
@@ -2044,7 +3803,7 @@ ${link}
   }
   if (data === 'ADMIN:GIFTS' && isAdmin(uid)) {
     const list = await listGiftCodes(env, 20);
-    const lines = list.map(g => `${g.code} | ${g.amount} سکه | ${g.disabled ? 'غیرفعال' : 'فعال'} | ${g.used||0}/${g.max_uses||'∞'}`).join('\n') || '—';
+    const lines = list.map(g => `${g.code} | ${g.amount} الماس | ${g.disabled ? 'غیرفعال' : 'فعال'} | ${g.used||0}/${g.max_uses||'∞'}`).join('\n') || '—';
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     await tgApi('sendMessage', { chat_id: chatId, text: `🎁 گیفت‌کدها:\n${lines}`, reply_markup: { inline_keyboard: [
       [{ text: '➕ ایجاد گیفت‌کد', callback_data: 'ADMIN:GIFT_CREATE' }],
@@ -2088,11 +3847,13 @@ ${link}
   if (data === 'ADMIN:SETTINGS' && isAdmin(uid)) {
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     const s = await getSettings(env);
-    await tgApi('sendMessage', { chat_id: chatId, text: `⚙️ تنظیمات سرویس:\n- محدودیت روزانه دانلود: ${s.daily_limit}\n- پیام خوش‌آمد: ${s.welcome_message ? 'تعریف شده' : '—'}\n- هزینه DNS اختصاصی: ${s.cost_dns} سکه\n- هزینه وایرگارد اختصاصی: ${s.cost_wg} سکه\n- هزینه OpenVPN: ${s.cost_ovpn||6} سکه`, reply_markup: { inline_keyboard: [
-      [{ text: '💰 تنظیم هزینه‌ها', callback_data: 'ADMIN:SET:COSTS' }],
-      [{ text: '🌐 مدیریت لوکیشن‌ها', callback_data: 'ADMIN:SET:LOCATIONS' }],
-      [{ text: '🚫 مدیریت دکمه‌ها', callback_data: 'ADMIN:SET:BTNS' }],
-      [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:PANEL' }]
+    await tgApi('sendMessage', { chat_id: chatId, text: `⚙️ تنظیمات سرویس:\n- محدودیت روزانه دانلود: ${s.daily_limit}\n- پیام خوش‌آمد: ${s.welcome_message ? 'تعریف شده' : '—'}\n- هزینه DNS اختصاصی: ${s.cost_dns} الماس\n- هزینه وایرگارد اختصاصی: ${s.cost_wg} الماس`, reply_markup: { inline_keyboard: [
+      [{ text: '✏️ ویرایش پیام خوش‌آمد', callback_data: 'ADMIN:SET:WELCOME' }, { text: '🔢 تغییر سقف روزانه', callback_data: 'ADMIN:SET:DAILY' }],
+      [{ text: '📝 ویرایش عنوان دکمه‌ها', callback_data: 'ADMIN:SET:BUTTONS' }],
+      [{ text: '💎 تغییر هزینه‌ها', callback_data: 'ADMIN:SET:COSTS' }],
+      [{ text: '🚫 مدیریت دکمه‌های غیرفعال', callback_data: 'ADMIN:DISABLE_BTNS' }],
+      [{ text: '🌐 وضعیت لوکیشن‌ها', callback_data: 'ADMIN:DISABLE_LOCS' }],
+      [{ text: '⬅️ بازگشت به پنل', callback_data: 'ADMIN:PANEL' }]
     ] } });
     return;
   }
@@ -2100,9 +3861,8 @@ ${link}
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     const s = await getSettings(env);
     const rows = [
-      [{ text: `DNS: ${s.cost_dns} سکه`, callback_data: 'NOOP' }, { text: '✏️ تغییر DNS', callback_data: 'ADMIN:SET:COST:DNS' }],
-      [{ text: `WG: ${s.cost_wg} سکه`, callback_data: 'NOOP' }, { text: '✏️ تغییر WG', callback_data: 'ADMIN:SET:COST:WG' }],
-      [{ text: `OVPN: ${s.cost_ovpn||6} سکه`, callback_data: 'NOOP' }, { text: '✏️ تغییر OVPN', callback_data: 'ADMIN:SET:COST:OVPN' }],
+      [{ text: `DNS: ${s.cost_dns} الماس`, callback_data: 'NOOP' }, { text: '✏️ تغییر DNS', callback_data: 'ADMIN:SET:COST:DNS' }],
+      [{ text: `WG: ${s.cost_wg} الماس`, callback_data: 'NOOP' }, { text: '✏️ تغییر WG', callback_data: 'ADMIN:SET:COST:WG' }],
       [{ text: '⬅️ بازگشت', callback_data: 'ADMIN:SETTINGS' }]
     ];
     await tgApi('sendMessage', { chat_id: chatId, text: '💎 تنظیم هزینه سرویس‌ها:', reply_markup: { inline_keyboard: rows } });
@@ -2110,32 +3870,19 @@ ${link}
   }
   if (data === 'ADMIN:SET:COST:DNS' && isAdmin(uid)) {
     await setSession(env, uid, { awaiting: 'set_cost_dns' });
-    await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار جدید هزینه DNS اختصاصی (سکه) را وارد کنید:' });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار جدید هزینه DNS اختصاصی (الماس) را وارد کنید:' });
     return;
   }
   if (data === 'ADMIN:SET:COST:WG' && isAdmin(uid)) {
     await setSession(env, uid, { awaiting: 'set_cost_wg' });
-    await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار جدید هزینه وایرگارد اختصاصی (سکه) را وارد کنید:' });
-    return;
-  }
-  if (data === 'ADMIN:SET:COST:OVPN' && isAdmin(uid)) {
-    await setSession(env, uid, { awaiting: 'set_cost_ovpn' });
-    await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار جدید هزینه OpenVPN (سکه) را وارد کنید:' });
-    return;
-  }
-
-  // Admin: user details
-  if (data === 'ADMIN:USER_DETAILS' && isAdmin(uid)) {
-    await setSession(env, uid, { awaiting: 'admin_user_details' });
-    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
-    await tgApi('sendMessage', { chat_id: chatId, text: 'آی‌دی عددی کاربر را وارد کنید:', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'مقدار جدید هزینه وایرگارد اختصاصی (الماس) را وارد کنید:' });
     return;
   }
   if (data === 'ADMIN:DISABLE_LOCS' && isAdmin(uid)) {
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
     const s = await getSettings(env);
     const map = s.disabled_locations || { dns: {}, wg: {} };
-    const countries = ['DE'];
+    const countries = ['ES','DE','FR','PH','JP','TR','SE','NL','DK','BE','CH','CN'];
     const dnsRows = countries.map(c => ([{ text: `${map.dns?.[c] ? '🟢 فعال‌سازی' : '🔴 غیرفعال'} DNS — ${countryFlag(c)} ${dnsCountryLabel(c)}`, callback_data: `ADMIN:LOC_TOGGLE:${c}:dns` }]));
     const wgRows = countries.map(c => ([{ text: `${map.wg?.[c] ? '🟢 فعال‌سازی' : '🔴 غیرفعال'} WG — ${countryFlag(c)} ${dnsCountryLabel(c)}`, callback_data: `ADMIN:LOC_TOGGLE:${c}:wg` }]));
     const rows = [
@@ -2178,10 +3925,12 @@ ${link}
     const map = s.disabled_buttons || {};
     const items = [
       { key: 'GET_BY_TOKEN', label: labelFor(s.button_labels, 'get_by_token', '🔑 دریافت با توکن') },
+      { key: 'MISSIONS', label: labelFor(s.button_labels, 'missions', '📆 مأموریت‌ها') },
+      { key: 'LOTTERY', label: labelFor(s.button_labels, 'lottery', '🎟 قرعه‌کشی') },
       { key: 'SUB:REFERRAL', label: '👥 زیرمجموعه گیری' },
-      { key: 'SUB:ACCOUNT', label: '👤 حساب کاربری' }
+      { key: 'SUB:ACCOUNT', label: '👤 حساب کاربری' },
+      { key: 'BUY_DIAMONDS', label: labelFor(s.button_labels, 'buy_points', '💳 خرید الماس') }
     ];
-
     const rows = items.map(it => ([{ text: `${map[it.key] ? '🟢 فعال‌سازی' : '🔴 غیرفعال'} ${it.label}` , callback_data: `ADMIN:BTN_TOGGLE:${encodeURIComponent(it.key)}` }]));
     rows.push([{ text: '⬅️ بازگشت', callback_data: 'ADMIN:SETTINGS' }]);
     await tgApi('sendMessage', { chat_id: chatId, text: '🚫 مدیریت دکمه‌ها:', reply_markup: { inline_keyboard: rows } });
@@ -2198,8 +3947,11 @@ ${link}
     // Refresh list view with human-friendly labels
     const items = [
       { key: 'GET_BY_TOKEN', label: labelFor(s.button_labels, 'get_by_token', '🔑 دریافت با توکن') },
+      { key: 'MISSIONS', label: labelFor(s.button_labels, 'missions', '📆 مأموریت‌ها') },
+      { key: 'LOTTERY', label: labelFor(s.button_labels, 'lottery', '🎟 قرعه‌کشی') },
       { key: 'SUB:REFERRAL', label: '👥 زیرمجموعه گیری' },
-      { key: 'SUB:ACCOUNT', label: '👤 حساب کاربری' }
+      { key: 'SUB:ACCOUNT', label: '👤 حساب کاربری' },
+      { key: 'BUY_DIAMONDS', label: labelFor(s.button_labels, 'buy_points', '💳 خرید الماس') }
     ];
     const rows = items.map(it => ([{ text: `${map[it.key] ? '🟢 فعال‌سازی' : '🔴 غیرفعال'} ${it.label}` , callback_data: `ADMIN:BTN_TOGGLE:${encodeURIComponent(it.key)}` }]));
     rows.push([{ text: '⬅️ بازگشت', callback_data: 'ADMIN:SETTINGS' }]);
@@ -2290,13 +4042,75 @@ ${link}
     await tgApi('sendMessage', { chat_id: chatId, text: 'ماموریت حذف شد.' });
     return;
   }
-  if ((data === 'ADMIN:BULK_UPLOAD' || data === 'ADMIN:BULK_META' || data === 'ADMIN:BULK_FINISH') && isAdmin(uid)) {
-    await setSession(env, uid, {});
+  if (data === 'ADMIN:BULK_UPLOAD' && isAdmin(uid)) {
+    await setSession(env, uid, { awaiting: 'bulk_upload', tokens: [] });
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
-    await tgApi('sendMessage', { chat_id: chatId, text: 'آپلود گروهی غیرفعال شده است.' });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'برای آپلود گروهی، فایل‌ها را یکی یکی ارسال کنید. سپس می‌توانید نام/دسته هر مورد را تنظیم کنید.', reply_markup: { inline_keyboard: [
+      [{ text: '🏷 تنظیم نام/دسته', callback_data: 'ADMIN:BULK_META' }],
+      [{ text: '✅ پایان', callback_data: 'ADMIN:BULK_FINISH' }],
+      [{ text: '❌ انصراف', callback_data: 'CANCEL' }]
+    ] } });
     return;
   }
-  // Admin Lottery removed
+  if (data === 'ADMIN:BULK_META' && isAdmin(uid)) {
+    await setSession(env, uid, { awaiting: 'bulk_meta' });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'JSON شامل آرایه‌ای از { token, name, category } ارسال کنید.', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (data === 'ADMIN:BULK_FINISH' && isAdmin(uid)) {
+    const sess = await getSession(env, uid);
+    const count = Array.isArray(sess.tokens) ? sess.tokens.length : 0;
+    await setSession(env, uid, {});
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: `پایان آپلود گروهی. تعداد آیتم‌ها: ${count}` });
+    return;
+  }
+  if (data === 'ADMIN:LOTTERY' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const cfg = await getLotteryConfig(env);
+    const enabled = cfg.enabled ? 'فعال' : 'غیرفعال';
+    const scheduleInfo = cfg.run_every_hours ? `\nبازه اجرا: هر ${cfg.run_every_hours} ساعت` : '';
+    await tgApi('sendMessage', { chat_id: chatId, text: `🎟 قرعه‌کشی: ${enabled}\nبرندگان هر دوره: ${cfg.winners||0}\nجایزه: ${cfg.reward_diamonds||0} الماس${scheduleInfo}`, reply_markup: { inline_keyboard: [
+      [{ text: cfg.enabled ? '🔴 غیرفعال‌سازی' : '🟢 فعال‌سازی', callback_data: 'ADMIN:LOT:TOGGLE' }],
+      [{ text: '✏️ تنظیم مقادیر', callback_data: 'ADMIN:LOT:CONFIG' }],
+      [{ text: '▶️ Start', callback_data: 'ADMIN:LOT:RUN_NOW' }],
+      [{ text: '📜 تاریخچه', callback_data: 'ADMIN:LOT:HISTORY' }],
+      [{ text: '🏠 منو', callback_data: 'MENU' }]
+    ] } });
+    return;
+  }
+  if (data === 'ADMIN:LOT:TOGGLE' && isAdmin(uid)) {
+    const cfg = await getLotteryConfig(env);
+    cfg.enabled = !cfg.enabled;
+    await setLotteryConfig(env, cfg);
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id, text: cfg.enabled ? 'فعال شد' : 'غیرفعال شد' });
+    return;
+  }
+  if (data === 'ADMIN:LOT:CONFIG' && isAdmin(uid)) {
+    await setSession(env, uid, { awaiting: 'lottery_cfg:winners' });
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    await tgApi('sendMessage', { chat_id: chatId, text: 'تعداد برندگان را وارد کنید (عدد صحیح مثبت):', reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'CANCEL' }]] } });
+    return;
+  }
+  if (data === 'ADMIN:LOT:RUN_NOW' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const dateKey = dayKey();
+    const res = await runLotteryPickAndReward(env, dateKey);
+    if (res.ok && res.winners && res.winners.length) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `✅ قرعه‌کشی اجرا شد. برندگان امروز (${dateKey}):\n${res.winners.map(w => `• ${w}`).join('\n')}` });
+    } else {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ قرعه‌کشی اجرا نشد (احتمالاً غیرفعال است یا شرکت‌کننده‌ای وجود ندارد).' });
+    }
+    return;
+  }
+  if (data === 'ADMIN:LOT:HISTORY' && isAdmin(uid)) {
+    await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
+    const hist = await getLotteryHistory(env, 10);
+    const txt = hist.length ? hist.map(h => `${formatDate(h.at)} → winners: ${h.winners.join(', ')} (+${h.reward_diamonds})`).join('\n') : '—';
+    await tgApi('sendMessage', { chat_id: chatId, text: `📜 تاریخچه قرعه‌کشی:\n${txt}` });
+    return;
+  }
   if (data === 'ADMIN:ADD_ADMIN' && isAdmin(uid)) {
     await setSession(env, uid, { awaiting: 'add_admin' });
     await tgApi('answerCallbackQuery', { callback_query_id: cb.id });
@@ -2314,11 +4128,13 @@ ${link}
     return;
   }
 }
+
+/* -------------------- Document upload flow -------------------- */
 async function onDocumentUpload(msg, env) {
   const doc = msg.document; const from = msg.from; const chatId = msg.chat.id;
   const fileId = doc.file_id; const fname = doc.file_name || 'config';
 
-  const token = makeToken(10);
+  const token = makeToken(18);
   const meta = {
     token,
     file_id: fileId,
@@ -2362,7 +4178,7 @@ async function handleAnyUpload(msg, env, { ownerId, replaceToken, original } = {
   };
 
   if (msg.text) {
-    const token = replaceToken || makeToken(10);
+    const token = replaceToken || makeToken(18);
     meta = {
       token,
       type: 'text',
@@ -2372,7 +4188,7 @@ async function handleAnyUpload(msg, env, { ownerId, replaceToken, original } = {
       ...base
     };
   } else if (msg.document) {
-    const token = replaceToken || makeToken(10);
+    const token = replaceToken || makeToken(18);
     meta = {
       token,
       type: 'document',
@@ -2382,7 +4198,7 @@ async function handleAnyUpload(msg, env, { ownerId, replaceToken, original } = {
       ...base
     };
   } else if (msg.photo && msg.photo.length) {
-    const token = replaceToken || makeToken(10);
+    const token = replaceToken || makeToken(18);
     const p = msg.photo[msg.photo.length - 1];
     meta = {
       token,
@@ -2393,7 +4209,7 @@ async function handleAnyUpload(msg, env, { ownerId, replaceToken, original } = {
       ...base
     };
   } else if (msg.video) {
-    const token = replaceToken || makeToken(10);
+    const token = replaceToken || makeToken(18);
     meta = {
       token,
       type: 'video',
@@ -2403,7 +4219,7 @@ async function handleAnyUpload(msg, env, { ownerId, replaceToken, original } = {
       ...base
     };
   } else if (msg.audio) {
-    const token = replaceToken || makeToken(10);
+    const token = replaceToken || makeToken(18);
     meta = {
       token,
       type: 'audio',
@@ -2413,7 +4229,7 @@ async function handleAnyUpload(msg, env, { ownerId, replaceToken, original } = {
       ...base
     };
   } else if (msg.voice) {
-    const token = replaceToken || makeToken(10);
+    const token = replaceToken || makeToken(18);
     meta = {
       token,
       type: 'voice',
@@ -2492,9 +4308,64 @@ async function handleFileDownload(req, env, url) {
 
 /* -------------------- Main Page with Admin Panel -------------------- */
 async function handleMainPage(req, env, url, ctx) {
-  // Deprecated heavy HTML page removed. Redirect to root status page.
-  return Response.redirect('/', 302);
-}
+  const key = url.searchParams.get('key');
+  const adminKey = (RUNTIME.adminKey || ADMIN_KEY || '').trim();
+  const isAuthenticated = key === adminKey;
+  const action = url.searchParams.get('action');
+  const op = url.searchParams.get('op');
+  const targetId = url.searchParams.get('uid');
+
+  // Handle toggle action via GET for convenience from admin panel button
+  if (isAuthenticated && action === 'toggle') {
+    const current = (await kvGetJson(env, 'bot:enabled')) ?? true;
+    await kvPutJson(env, 'bot:enabled', !current);
+    return Response.redirect(`/?key=${adminKey}`, 302);
+  }
+
+  // Admin action: setup webhook
+  if (isAuthenticated && action === 'setup-webhook') {
+    const setRes = await tgSetWebhook(RUNTIME.webhookUrl || WEBHOOK_URL);
+    if (setRes && setRes.ok) {
+      await kvPutJson(env, 'bot:webhook_set_at', now());
+    }
+    return Response.redirect(`/?key=${adminKey}`, 302);
+  }
+  // Admin action: toggle update mode
+  if (isAuthenticated && action === 'toggle-update') {
+    const current = (await kvGetJson(env, 'bot:update_mode')) || false;
+    await kvPutJson(env, 'bot:update_mode', !current);
+    return Response.redirect(`/?key=${adminKey}`, 302);
+  }
+  // Admin action: broadcast via GET (simple)
+  if (isAuthenticated && action === 'broadcast') {
+    const msg = url.searchParams.get('message') || '';
+    if (msg.trim()) {
+      // run broadcast in background to keep page responsive
+      if (ctx) ctx.waitUntil(broadcast(env, msg.trim())); else await broadcast(env, msg.trim());
+    }
+    return Response.redirect(`/?key=${adminKey}`, 302);
+  }
+  // Admin view: full users list
+  if (isAuthenticated && action === 'users') {
+    const users = (await kvGetJson(env, 'index:users')) || [];
+    const entries = await Promise.all(users.map(async (uid, idx) => {
+      const u = (await kvGetJson(env, `user:${uid}`)) || { id: uid };
+      const blocked = await isUserBlocked(env, uid);
+      return {
+        idx: idx + 1,
+        id: uid,
+        first_name: u.first_name || '-',
+        username: u.username || '-',
+        diamonds: u.diamonds || 0,
+        referrals: u.referrals || 0,
+        joined: u.joined ? '✅' : '—',
+        created_at: u.created_at || 0,
+        last_seen: u.last_seen || 0,
+        referred_by: u.referred_by || '-',
+        ref_credited: u.ref_credited ? '✅' : '—',
+        blocked
+      };
+    }));
 
 /* -------------------- Public Mini App: Top Referrers -------------------- */
 async function handleMiniApp(env) {
@@ -2897,13 +4768,13 @@ async function handleBotDownload(env, uid, chatId, token, ref) {
   if ((user.diamonds || 0) < needed) {
   const botUsername = await getBotUsername(env);
   const refLink = botUsername ? `https://t.me/${botUsername}?start=${uid}` : '';
-    await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ سکه کافی ندارید. نیاز: ${needed} | سکه شما: ${user.diamonds||0}${refLink ? `\nبرای کسب سکه لینک معرفی شما:\n${refLink}` : ''}` });
+    await tgApi('sendMessage', { chat_id: chatId, text: `⚠️ الماس کافی ندارید. نیاز: ${needed} | الماس شما: ${user.diamonds||0}${refLink ? `\nبرای کسب الماس لینک معرفی شما:\n${refLink}` : ''}` });
       return;
     }
     const ok = await checkRateLimit(env, uid, 'confirm_spend', 3, 60_000);
     if (!ok) { await tgApi('sendMessage', { chat_id: chatId, text: 'تعداد درخواست بیش از حد. لطفاً بعداً تلاش کنید.' }); return; }
     await setSession(env, uid, { awaiting: `confirm_spend:${token}:${needed}:${ref||''}` });
-  await tgApi('sendMessage', { chat_id: chatId, text: `این فایل ${needed} سکه هزینه دارد. مایل به پرداخت هستید؟`, reply_markup: { inline_keyboard: [
+  await tgApi('sendMessage', { chat_id: chatId, text: `این فایل ${needed} الماس هزینه دارد. مایل به پرداخت هستید؟`, reply_markup: { inline_keyboard: [
       [{ text: '✅ بله، پرداخت و دریافت', callback_data: `CONFIRM_SPEND:${token}:${needed}:${ref||''}` }],
       [{ text: '❌ خیر، بازگشت به منو', callback_data: 'MENU' }]
     ] } });
@@ -2922,7 +4793,7 @@ async function handleBotDownload(env, uid, chatId, token, ref) {
         currentUser.ref_credited = true;
         currentUser.referred_by = currentUser.referred_by || Number(ref);
         await kvPutJson(env, `user:${uid}`, currentUser);
-         await tgApi('sendMessage', { chat_id: Number(ref), text: '🎉 یک سکه بابت معرفی دریافت کردید.' });
+         await tgApi('sendMessage', { chat_id: Number(ref), text: '🎉 یک الماس بابت معرفی دریافت کردید.' });
       }
     }
   }
@@ -3019,7 +4890,7 @@ async function buildMissionsView(env, uid) {
     const done = Boolean((prog.map||{})[markKey]);
     const periodLabel = m.period === 'weekly' ? 'هفتگی' : (m.period === 'daily' ? 'روزانه' : 'یکبار');
     const typeLabel = m.type === 'quiz' ? 'کوییز' : (m.type === 'question' ? 'مسابقه' : (m.type === 'invite' ? 'دعوت' : 'عمومی'));
-    return `${done ? '✅' : '⬜️'} ${m.title} (${periodLabel} | ${typeLabel}) +${m.reward} سکه`;
+    return `${done ? '✅' : '⬜️'} ${m.title} (${periodLabel} | ${typeLabel}) +${m.reward} الماس`;
   }).join('\n');
   const actions = [];
   actions.push([{ text: '✅ دریافت پاداش هفتگی (هر ۷ روز)', callback_data: 'WEEKLY_CHECKIN' }]);
@@ -3029,7 +4900,7 @@ async function buildMissionsView(env, uid) {
   if (quiz) actions.push([{ text: '🎮 شرکت در کوییز هفتگی', callback_data: `MIS:QUIZ:${quiz.id}` }]);
   if (question) actions.push([{ text: '❓ پاسخ سوال هفتگی', callback_data: `MIS:Q:${question.id}` }]);
   actions.push([{ text: '🏠 منو', callback_data: 'MENU' }]);
-  return { text: `📆 مأموریت‌ها:\n${list}\n\nبا انجام فعالیت‌ها و چک‌این هفتگی سکه بگیرید.`, reply_markup: { inline_keyboard: actions } };
+  return { text: `📆 مأموریت‌ها:\n${list}\n\nبا انجام فعالیت‌ها و چک‌این هفتگی الماس بگیرید.`, reply_markup: { inline_keyboard: actions } };
 }
 
 /* -------------------- Lottery helpers -------------------- */
@@ -3236,7 +5107,7 @@ async function redeemGiftCode(env, uid, code) {
   await kvPutJson(env, usedKey, { used_at: now() });
   meta.used = (meta.used || 0) + 1;
   await kvPutJson(env, key, meta);
-  return { ok: true, message: `🎁 ${meta.amount} سکه به حساب شما اضافه شد.` };
+  return { ok: true, message: `🎁 ${meta.amount} الماس به حساب شما اضافه شد.` };
 }
 
 /* -------------------- Panel items (Buy Panel) -------------------- */
@@ -3316,8 +5187,8 @@ async function isUserJoinedAllRequiredChannels(env, userId) {
   for (const ch of channels) {
     try {
       const ans = await tgGet(`getChatMember?chat_id=${encodeURIComponent(ch)}&user_id=${userId}`);
-      if (!ans || !ans.ok) return false;
-      const status = ans.result.status;
+    if (!ans || !ans.ok) return false;
+    const status = ans.result.status;
       if (!['member', 'creator', 'administrator'].includes(status)) return false;
     } catch (_) { return false; }
   }
@@ -3337,18 +5208,12 @@ async function presentJoinPrompt(env, chatId) {
 /* -------------------- Webhook ensure helper -------------------- */
 async function ensureWebhookForRequest(env, req) {
   try {
-    // If bot token is not configured, skip webhook checks
-    if (!(RUNTIME.tgToken || TELEGRAM_TOKEN)) return;
     // Throttle to at most once per 10 minutes
     const last = await kvGetJson(env, 'bot:webhook_check_at');
     const nowTs = now();
     if (last && (nowTs - last) < 10 * 60 * 1000) return;
     const info = await tgGet('getWebhookInfo');
-    let want = RUNTIME.webhookUrl || WEBHOOK_URL || '';
-    // If not configured, infer from the incoming request origin (Worker accepts POST to any non-/api path)
-    if (!want && req && req.url) {
-      try { want = new URL(req.url).origin; } catch (_) {}
-    }
+    const want = RUNTIME.webhookUrl || WEBHOOK_URL || '';
     const current = info && info.result && info.result.url || '';
     if (!current || current !== want) {
       if (want) {
@@ -3359,6 +5224,5 @@ async function ensureWebhookForRequest(env, req) {
     await kvPutJson(env, 'bot:webhook_check_at', nowTs);
   } catch (_) { /* ignore */ }
 }
-  
+
 /* End of enhanced worker */
-}
