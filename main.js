@@ -52,6 +52,7 @@ function buildFileAdminKb(meta) {
     [ { text: meta.disabled ? '✅ فعال‌سازی' : '⛔️ غیرفعال‌سازی', callback_data: `file_toggle_disable:${t}` } ],
     [ { text: '💰 تنظیم قیمت', callback_data: `file_set_price:${t}` }, { text: '👥 محدودیت یکتا', callback_data: `file_set_limit:${t}` } ],
     [ { text: '♻️ جایگزینی فایل', callback_data: `file_replace:${t}` } ],
+    [ { text: '🗑 حذف فایل', callback_data: `file_delete:${t}` } ],
     [ { text: '🔙 بازگشت', callback_data: 'back_main' } ],
   ]);
 }
@@ -184,8 +185,8 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.7';
-  } catch { return '1.7'; }
+    return s?.bot_version || '2.0';
+  } catch { return '2.0'; }
 }
 
 // ------------------ Build main menu header text ------------------ //
@@ -564,6 +565,16 @@ function htmlEscape(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp
 // =========================================================
 function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
 
+// آیکون نوع فایل
+function kindIcon(kind) {
+  const k = String(kind || 'document');
+  if (k === 'photo') return '🖼';
+  if (k === 'video') return '🎬';
+  if (k === 'audio') return '🎵';
+  if (k === 'text') return '📝';
+  return '📄';
+}
+
 // تشخیص ادمین از روی متغیرهای محیطی
 function isAdminUser(env, uid) {
   try {
@@ -815,6 +826,26 @@ async function onMessage(msg, env) {
         await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
         await clearUserState(env, uid);
         await tgSendMessage(env, chat_id, 'رسید شما دریافت شد. در حال بررسی توسط پشتیبانی ✅', kbAdminInfo);
+        return;
+      }
+      if (data.startsWith('file_delete:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        const kbDel = kb([[{ text: '✅ تایید حذف', callback_data: 'file_delete_confirm:'+t }],[{ text: '🔙 انصراف', callback_data: 'file_manage:'+t }]]);
+        await tgEditMessage(env, chat_id, mid, `❗️ آیا از حذف فایل با توکن <code>${t}</code> مطمئن هستید؟ این عملیات غیرقابل بازگشت است.`, kbDel);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('file_delete_confirm:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        await kvDel(env, key);
+        await tgEditMessage(env, chat_id, mid, `🗑 فایل با توکن <code>${t}</code> حذف شد.`, fmMenuKb());
+        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
         return;
       }
       if (msg.document && msg.document.file_id) {
@@ -1335,7 +1366,7 @@ async function onCallback(cb, env) {
           if (page > totalPages) page = totalPages;
           const start = (page-1)*pageSize;
           const slice = all.slice(start, start+pageSize);
-          const rows = slice.map(f => ([{ text: `مدیریت: ${f.token}`, callback_data: 'file_manage:' + f.token }]))
+          const rows = slice.map(f => ([{ text: `${kindIcon(f.kind)} مدیریت: ${f.token}`, callback_data: 'file_manage:' + f.token }]))
           const nav = [];
           if (page>1) nav.push({ text: '⬅️ قبلی', callback_data: 'myfiles_p:'+(page-1) });
           if (page<totalPages) nav.push({ text: 'بعدی ➡️', callback_data: 'myfiles_p:'+(page+1) });
