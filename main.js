@@ -27,8 +27,6 @@
   - Private link: /f/<token>?uid=<telegram_id>&ref=<referrer_id>
 */
 
-// Bot Version: 1.0
-
 // =========================================================
 // 1) Config & Runtime
 // =========================================================
@@ -52,8 +50,8 @@ const CONFIG = {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.0';
-  } catch { return '1.0'; }
+    return s?.bot_version || '1.1';
+  } catch { return '1.1'; }
 }
 
 async function mainMenuHeader(env) {
@@ -404,9 +402,11 @@ function adminMenuKb(settings) {
     [ { text: '📤 بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
     // Row 3: Tickets | Gift Codes
     [ { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' }, { text: '🎁 کدهای هدیه', callback_data: 'adm_gifts' } ],
-    // Row 4: Join Mandatory | Bot Stats
+    // Row 4: Service Settings (feature toggles)
+    [ { text: '⚙️ تنظیمات سرویس', callback_data: 'adm_service' } ],
+    // Row 5: Join Mandatory | Bot Stats
     [ { text: '📢 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
-    // Row 5: Subtract | Add Coins
+    // Row 6: Subtract | Add Coins
     [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
   ]);
 }
