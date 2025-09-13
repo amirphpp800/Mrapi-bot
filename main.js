@@ -127,9 +127,7 @@ function buildPurchaseCaption(p) {
   if (p.amount_label) lines.push(`💰 مبلغ: <b>${p.amount_label}</b>`);
   lines.push(`🆔 شناسه: <code>${p.id}</code>`);
   // وضعیت سفارش
-  if (!p.status || p.status === 'pending') {
-    lines.push('⏳ وضعیت: در انتظار بررسی');
-  } else {
+  if (p.status && p.status !== 'pending') {
     const st = p.status === 'approved' ? '✅ تایید شد' : '❌ رد شد';
     lines.push(st);
     if (p.reason && p.status === 'rejected') lines.push(`دلیل: ${p.reason}`);
@@ -186,8 +184,8 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.6';
-  } catch { return '1.6'; }
+    return s?.bot_version || '1.7';
+  } catch { return '1.7'; }
 }
 
 // ------------------ Build main menu header text ------------------ //
@@ -614,7 +612,7 @@ function adminMenuKb(settings) {
     // Row 1: Update mode only
     [ { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' } ],
     // Row 2: Manage Files | Upload (upload on the right)
-    [ { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' }, { text: '📤 بارگذاری فایل', callback_data: 'adm_upload' } ],
+    [ { text: '🗂 مدیریت فایل‌ها', callback_data: 'fm' }, { text: '📤 بارگذاری فایل', callback_data: 'adm_upload' } ],
     // Row 3: Tickets | Gift Codes
     [ { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' }, { text: '🎁 کدهای هدیه', callback_data: 'adm_gifts' } ],
     // Row 4: Service Settings (feature toggles)
@@ -623,10 +621,8 @@ function adminMenuKb(settings) {
     [ { text: '📢 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     // Row 6: Subtract | Add Coins
     [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
-    // Row 7: Broadcast
-    [ { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
-    // Row 7: Help
-    [ { text: '📘 راهنمای دستورات', callback_data: 'help' } ],
+    // Row 7: Help + Broadcast in same row
+    [ { text: '📘 راهنما', callback_data: 'help' }, { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
   ]);
 }
 
@@ -1149,13 +1145,14 @@ async function onCallback(cb, env) {
     const chat_id = cb.message?.chat?.id;
     const mid = cb.message?.message_id;
 
-    // اگر دکمه‌ها در تنظیمات غیرفعال شده‌اند، برای همه کاربران (به جز چند مسیر ضروری) پیام اطلاع بده
+    // اگر برخی دکمه‌ها به صورت مجزا غیرفعال شده‌اند و کاربر ادمین نیست
     try {
       const s = await getSettings(env);
-      const whitelist = ['join_check', 'back_main', 'adm_service', 'adm_service_toggle', 'adm_buttons_toggle'];
-      if (s?.buttons_disabled === true && !isAdminUser(env, uid) && !whitelist.includes(data)) {
+      const disabled = Array.isArray(s?.disabled_buttons) ? s.disabled_buttons : [];
+      const wh = ['join_check', 'back_main', 'adm_service', 'adm_buttons', 'adm_buttons_add', 'adm_buttons_clear'];
+      if (!isAdminUser(env, uid) && disabled.includes(data) && !wh.includes(data)) {
         await tgAnswerCallbackQuery(env, cb.id, 'غیرفعال است');
-        await tgSendMessage(env, chat_id, s.disabled_message || '🔧 دکمه‌ها موقتاً غیرفعال هستند.');
+        await tgSendMessage(env, chat_id, s.disabled_message || '🔧 این دکمه موقتاً غیرفعال است.');
         return;
       }
     } catch {}
@@ -1338,7 +1335,7 @@ async function onCallback(cb, env) {
           if (page > totalPages) page = totalPages;
           const start = (page-1)*pageSize;
           const slice = all.slice(start, start+pageSize);
-          const rows = slice.map(f => ([{ text: `مدیریت: ${f.file_name.slice(0,30)}`, callback_data: 'file_manage:' + f.token }]));
+          const rows = slice.map(f => ([{ text: `مدیریت: ${f.token}`, callback_data: 'file_manage:' + f.token }]))
           const nav = [];
           if (page>1) nav.push({ text: '⬅️ قبلی', callback_data: 'myfiles_p:'+(page-1) });
           if (page<totalPages) nav.push({ text: 'بعدی ➡️', callback_data: 'myfiles_p:'+(page+1) });
@@ -1353,8 +1350,73 @@ async function onCallback(cb, env) {
         const token = data.split(':')[1];
         const meta = await kvGet(env, CONFIG.FILE_PREFIX + token);
         if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'در دسترس نیست'); return; }
-        const info = [`نام: <b>${htmlEscape(meta.file_name)}</b>`,`قیمت: <b>${fmtNum(meta.price||0)}</b> ${CONFIG.DEFAULT_CURRENCY}`,`محدودیت یکتا: <b>${meta.max_users||0}</b>`,`توکن: <code>${meta.token}</code>`].join('\n');
+        const botUser = await getBotUsername(env);
+        const base = await getBaseUrlFromBot(env);
+        const deepLink = botUser ? `https://t.me/${botUser}?start=${meta.token}` : '';
+        const publicLink = base ? `${base}/f/${meta.token}?uid=${uid}` : '';
+        const info = [
+          `توکن: <code>${meta.token}</code>`,
+          `نام: <b>${htmlEscape(meta.file_name)}</b>`,
+          `قیمت: <b>${fmtNum(meta.price||0)}</b> ${CONFIG.DEFAULT_CURRENCY}`,
+          `محدودیت یکتا: <b>${meta.max_users||0}</b>`,
+          deepLink ? `لینک ربات: <code>${deepLink}</code>` : '',
+          publicLink ? `لینک مستقیم (با uid): <code>${publicLink}</code>` : '',
+        ].filter(Boolean).join('\n');
         await tgEditMessage(env, chat_id, mid, info, buildFileAdminKb(meta));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('file_toggle_disable:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        meta.disabled = !meta.disabled;
+        await kvSet(env, key, meta);
+        const botUser = await getBotUsername(env);
+        const base = await getBaseUrlFromBot(env);
+        const deepLink = botUser ? `https://t.me/${botUser}?start=${meta.token}` : '';
+        const publicLink = base ? `${base}/f/${meta.token}?uid=${uid}` : '';
+        const info = [
+          `توکن: <code>${meta.token}</code>`,
+          `نام: <b>${htmlEscape(meta.file_name)}</b>`,
+          `قیمت: <b>${fmtNum(meta.price||0)}</b> ${CONFIG.DEFAULT_CURRENCY}`,
+          `محدودیت یکتا: <b>${meta.max_users||0}</b>`,
+          `وضعیت: ${meta.disabled ? '⛔️ غیرفعال' : '✅ فعال'}`,
+          deepLink ? `لینک ربات: <code>${deepLink}</code>` : '',
+          publicLink ? `لینک مستقیم (با uid): <code>${publicLink}</code>` : '',
+        ].filter(Boolean).join('\n');
+        await tgEditMessage(env, chat_id, mid, info, buildFileAdminKb(meta));
+        await tgAnswerCallbackQuery(env, cb.id, meta.disabled ? 'غیرفعال شد' : 'فعال شد');
+        return;
+      }
+      if (data.startsWith('file_set_price:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        await setUserState(env, uid, { step: 'file_set_price_wait', token: t });
+        await tgSendMessage(env, chat_id, '💰 قیمت جدید را ارسال کنید (عدد):');
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('file_set_limit:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        await setUserState(env, uid, { step: 'file_set_limit_wait', token: t });
+        await tgSendMessage(env, chat_id, '🔢 محدودیت یکتا را ارسال کنید (عدد، 0 یعنی بدون محدودیت):');
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('file_replace:')) {
+        const t = data.split(':')[1];
+        const key = CONFIG.FILE_PREFIX + t;
+        const meta = await kvGet(env, key);
+        if (!meta || String(meta.owner_id) !== String(uid)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        await setUserState(env, uid, { step: 'file_replace_wait', token: t });
+        await tgSendMessage(env, chat_id, '📤 لطفاً فایل/رسانه جدید را ارسال کنید.');
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -1378,51 +1440,54 @@ async function onCallback(cb, env) {
       if (data === 'adm_service') {
         const s = await getSettings(env);
         const enabled = s?.service_enabled !== false;
+        const disabledCount = Array.isArray(s.disabled_buttons) ? s.disabled_buttons.length : 0;
         const btns = [
-          [{ text: enabled ? ' غیرفعال کردن سرویس' : ' فعال کردن سرویس', callback_data: 'adm_service_toggle' }],
+          [{ text: ` مدیریت دکمه‌های غیرفعال (${disabledCount})`, callback_data: 'adm_buttons' }],
+          [{ text: ' بازگشت', callback_data: 'admin' }],
         ];
-        try {
-          const s2 = s || {};
-          const disabled = s2.buttons_disabled === true;
-          btns.push([{ text: disabled ? ' فعال کردن دکمه‌ها' : ' غیرفعال کردن دکمه‌ها', callback_data: 'adm_buttons_toggle' }]);
-        } catch {}
-        btns.push([{ text: ' بازگشت', callback_data: 'admin' }]);
-        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nوضعیت دکمه‌ها: ${(s?.buttons_disabled===true)?'غیرفعال':'فعال'}`;
+        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nتعداد دکمه‌های غیرفعال: ${disabledCount}`;
         const kbSrv = kb(btns);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
-      if (data === 'adm_service_toggle') {
+      if (data === 'adm_buttons') {
         const s = await getSettings(env);
-        s.service_enabled = s?.service_enabled === false ? true : false;
-        await setSettings(env, s);
-        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${s.service_enabled !== false ? 'فعال' : 'غیرفعال'}\nوضعیت دکمه‌ها: ${(s?.buttons_disabled===true)?'غیرفعال':'فعال'}`;
+        const list = Array.isArray(s.disabled_buttons) ? s.disabled_buttons : [];
+        const txt = ` مدیریت دکمه‌های غیرفعال\nدکمه‌های فعلی: ${list.length ? list.map(x=>`<code>${htmlEscape(x)}</code>`).join(', ') : '—'}\n\nافزودن/حذف: دکمه زیر را بزنید و سپس مقدار <code>callback_data</code> را ارسال کنید.\nپاکسازی برای خالی کردن لیست.`;
         const kbSrv = kb([[
-          { text: s.service_enabled !== false ? ' غیرفعال کردن سرویس' : ' فعال کردن سرویس', callback_data: 'adm_service_toggle' }
+          { text: '➕ افزودن/حذف دکمه', callback_data: 'adm_buttons_add' }
         ],[
-          { text: (s?.buttons_disabled===true) ? ' فعال کردن دکمه‌ها' : ' غیرفعال کردن دکمه‌ها', callback_data: 'adm_buttons_toggle' }
+          { text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }
         ],[
-          { text: ' بازگشت', callback_data: 'admin' }
+          { text: ' بازگشت', callback_data: 'adm_service' }
         ]]);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
-        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
-      if (data === 'adm_buttons_toggle') {
+      if (data === 'adm_buttons_clear') {
         const s = await getSettings(env);
-        s.buttons_disabled = s?.buttons_disabled === true ? false : true;
+        s.disabled_buttons = [];
         await setSettings(env, s);
-        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${s.service_enabled !== false ? 'فعال' : 'غیرفعال'}\nوضعیت دکمه‌ها: ${(s?.buttons_disabled===true)?'غیرفعال':'فعال'}`;
+        await tgAnswerCallbackQuery(env, cb.id, 'خالی شد');
+        // Refresh view
+        const list = [];
+        const txt = ` مدیریت دکمه‌های غیرفعال\nدکمه‌های فعلی: —`;
         const kbSrv = kb([[
-          { text: s.service_enabled !== false ? ' غیرفعال کردن سرویس' : ' فعال کردن سرویس', callback_data: 'adm_service_toggle' }
+          { text: '➕ افزودن/حذف دکمه', callback_data: 'adm_buttons_add' }
         ],[
-          { text: (s?.buttons_disabled===true) ? ' فعال کردن دکمه‌ها' : ' غیرفعال کردن دکمه‌ها', callback_data: 'adm_buttons_toggle' }
+          { text: '🧹 پاکسازی', callback_data: 'adm_buttons_clear' }
         ],[
-          { text: ' بازگشت', callback_data: 'admin' }
+          { text: ' بازگشت', callback_data: 'adm_service' }
         ]]);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
-        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        return;
+      }
+      if (data === 'adm_buttons_add') {
+        await setUserState(env, uid, { step: 'adm_buttons_wait' });
+        await tgEditMessage(env, chat_id, mid, 'لطفاً مقدار دقیق callback_data دکمه‌ای که می‌خواهید غیرفعال/فعال شود را ارسال کنید.', {});
+        await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data === 'adm_add') {
@@ -1830,8 +1895,9 @@ async function buildUserReport(env, targetUid) {
 async function getSettings(env) {
   const s = (await kvGet(env, CONFIG.SERVICE_TOGGLE_KEY)) || {};
   if (typeof s.service_enabled === 'undefined') s.service_enabled = true;
-  if (typeof s.buttons_disabled === 'undefined') s.buttons_disabled = false;
-  if (!s.disabled_message) s.disabled_message = '🔧 دکمه‌ها موقتاً غیرفعال هستند و در حال توسعه می‌باشند.';
+  // granular disabled buttons list
+  if (!Array.isArray(s.disabled_buttons)) s.disabled_buttons = [];
+  if (!s.disabled_message) s.disabled_message = '🔧 این دکمه موقتاً غیرفعال است.';
   return s;
 }
 async function setSettings(env, s) { return kvSet(env, CONFIG.SERVICE_TOGGLE_KEY, s); }
