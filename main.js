@@ -50,8 +50,8 @@ const CONFIG = {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '1.1';
-  } catch { return '1.1'; }
+    return s?.bot_version || '1.2';
+  } catch { return '1.2'; }
 }
 
 async function mainMenuHeader(env) {
