@@ -29,6 +29,18 @@ const CONFIG = {
   GIFT_PREFIX: 'gift:',
   REDEEM_PREFIX: 'redeem:',
   REF_DONE_PREFIX: 'ref:done:',
+  PURCHASE_PREFIX: 'purchase:',
+  // پرداخت و پلن‌ها (می‌توانید از طریق تنظیمات نیز override کنید)
+  PLANS: [
+    { id: 'p1', coins: 10, price_label: '۵۰٬۰۰۰ تومان' },
+    { id: 'p2', coins: 25, price_label: '۱۲۰٬۰۰۰ تومان' },
+    { id: 'p3', coins: 50, price_label: '۲۳۰٬۰۰۰ تومان' },
+  ],
+  CARD_INFO: {
+    card_number: '6037-9915-1234-5678',
+    holder_name: 'نام دارنده کارت',
+    pay_note: 'لطفاً پس از پرداخت، رسید را ارسال کنید.'
+  },
 };
 
 // صفحات فانکشنز env: { BOT_KV }
@@ -74,6 +86,19 @@ async function deliverFileToUser(env, uid, chat_id, token) {
   }
 }
 
+async function tgSendPhoto(env, chat_id, file_id_or_url, opts = {}) {
+  try {
+    const form = new FormData();
+    form.set('chat_id', String(chat_id));
+    form.set('photo', file_id_or_url);
+    Object.entries(opts || {}).forEach(([k, v]) => {
+      if (v != null) form.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    });
+    const res = await fetch(tgApiUrl('sendPhoto', env), { method: 'POST', body: form });
+    return await res.json();
+  } catch (e) { console.error('tgSendPhoto error', e); return null; }
+}
+
 async function handleTokenRedeem(env, uid, chat_id, token) {
   try {
     const t = String(token || '').trim();
@@ -98,7 +123,7 @@ async function getBotVersion(env) {
   } catch { return '1.5'; }
 }
 
-// ------------------ Get bot version (for display in main menu) ------------------ //
+// ------------------ Build main menu header text ------------------ //
 async function mainMenuHeader(env) {
   const v = await getBotVersion(env);
   return `منو اصلی:\nنسخه ربات: ${v}`;
@@ -363,7 +388,7 @@ async function buildJoinKb(env) {
       const ch = chRaw.trim();
       if (!ch) continue;
       const url = ch.startsWith('http') ? ch : `https://t.me/${ch.replace(/^@/, '')}`;
-      // به درخواست شما آیدی کانال نمایش داده نشود
+      // Hide channel usernames in label; link goes to channel URL
       rows.push([{ text: 'عضویت در کانال', url }]);
     }
     rows.push([{ text: '✅ بررسی عضویت', callback_data: 'join_check' }]);
@@ -460,6 +485,17 @@ function isAdminUser(env, uid) {
   return false;
 }
 
+function getAdminChatIds(env) {
+  const ids = [];
+  try {
+    const single = (env?.ADMIN_ID || '').trim();
+    if (single) ids.push(String(single));
+    const list = (env?.ADMIN_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    for (const id of list) if (!ids.includes(String(id))) ids.push(String(id));
+  } catch {}
+  return ids;
+}
+
 function mainMenuKb(env, uid) {
   const rows = [
     [ { text: '👥 معرفی دوستان', callback_data: 'referrals' }, { text: '👤 حساب کاربری', callback_data: 'account' } ],
@@ -485,8 +521,8 @@ function adminMenuKb(settings) {
   return kb([
     // Row 1: Update mode only
     [ { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' } ],
-    // Row 2: Upload | Manage Files
-    [ { text: '📤 بارگذاری فایل', callback_data: 'adm_upload' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
+    // Row 2: Manage Files | Upload (upload on the right)
+    [ { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' }, { text: '📤 بارگذاری فایل', callback_data: 'adm_upload' } ],
     // Row 3: Tickets | Gift Codes
     [ { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' }, { text: '🎁 کدهای هدیه', callback_data: 'adm_gifts' } ],
     // Row 4: Service Settings (feature toggles)
@@ -495,6 +531,8 @@ function adminMenuKb(settings) {
     [ { text: '📢 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     // Row 6: Subtract | Add Coins
     [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
+    // Row 7: Help
+    [ { text: '📘 راهنمای دستورات', callback_data: 'help' } ],
   ]);
 }
 
@@ -522,14 +560,9 @@ async function handleRoot(request, env) {
   }
 }
 
-// پنل وب مدیریت حذف شد
-
-// لاگین و سشن حذف شد
-
-// احراز هویت وبی حذف شد
-
+// Handle incoming webhook requests from Telegram
 async function handleWebhook(request, env, ctx) {
-  // فقط POST از تلگرام پذیرفته می‌شود
+  // Only accept POST requests from Telegram
   if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
   if (!env?.BOT_TOKEN) {
     console.error('handleWebhook: BOT_TOKEN is not set');
@@ -651,6 +684,66 @@ async function onMessage(msg, env) {
       return;
     }
 
+    // خرید: دریافت رسید پرداخت
+    const stBuy = await getUserState(env, uid);
+    if (stBuy?.step === 'buy_wait_receipt') {
+      let mediaHandled = false;
+      let caption = 'رسید پرداخت';
+      const kbAdminInfo = kb([[ { text: '🔙 بازگشت', callback_data: 'back_main' } ]]);
+      if (msg.photo && Array.isArray(msg.photo) && msg.photo.length) {
+        const largest = msg.photo[msg.photo.length - 1];
+        mediaHandled = true;
+        // فوروارد برای ادمین‌ها با دکمه تایید/رد
+        const purchaseId = stBuy.purchase_id || newToken(8);
+        const p = {
+          id: purchaseId,
+          user_id: uid,
+          coins: stBuy.coins,
+          plan_id: stBuy.plan_id,
+          amount_label: stBuy.amount_label,
+          status: 'pending',
+          ts: nowTs(),
+        };
+        await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
+        const admins = getAdminChatIds(env);
+        const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
+        const info = `درخواست خرید سکه\nکاربر: ${uid}\nپلن: ${p.coins} ${CONFIG.DEFAULT_CURRENCY}\nمبلغ: ${p.amount_label}\nشناسه: ${purchaseId}`;
+        for (const aid of admins) {
+          await tgSendMessage(env, aid, info);
+          await tgSendPhoto(env, aid, largest.file_id, { caption, reply_markup: adminKb.reply_markup });
+        }
+        await clearUserState(env, uid);
+        await tgSendMessage(env, chat_id, 'رسید شما دریافت شد. در حال بررسی توسط پشتیبانی ✅', kbAdminInfo);
+        return;
+      }
+      if (msg.document && msg.document.file_id) {
+        mediaHandled = true;
+        const purchaseId = stBuy.purchase_id || newToken(8);
+        const p = {
+          id: purchaseId,
+          user_id: uid,
+          coins: stBuy.coins,
+          plan_id: stBuy.plan_id,
+          amount_label: stBuy.amount_label,
+          status: 'pending',
+          ts: nowTs(),
+        };
+        await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
+        const admins = getAdminChatIds(env);
+        const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
+        const info = `درخواست خرید سکه\nکاربر: ${uid}\nپلن: ${p.coins} ${CONFIG.DEFAULT_CURRENCY}\nمبلغ: ${p.amount_label}\nشناسه: ${purchaseId}`;
+        for (const aid of admins) {
+          await tgSendMessage(env, aid, info);
+          await tgSendDocument(env, aid, msg.document.file_id, { caption, reply_markup: adminKb.reply_markup });
+        }
+        await clearUserState(env, uid);
+        await tgSendMessage(env, chat_id, 'رسید شما دریافت شد. در حال بررسی توسط پشتیبانی ✅', kbAdminInfo);
+        return;
+      }
+      await tgSendMessage(env, chat_id, 'لطفاً رسید را به صورت عکس یا فایل ارسال کنید.');
+      return;
+    }
+
     // دریافت فایل (Document)
     if (msg.document) {
       // بررسی فعال بودن سرویس
@@ -660,8 +753,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, 'سرویس موقتاً غیرفعال است. لطفاً بعداً تلاش کنید.');
         return;
       }
-      // adm_cost removed per request
-
+      
       // اگر ادمین در فلو آپلود است
       const st = await getUserState(env, uid);
       if (isAdminUser(env, uid) && st?.step === 'adm_upload_wait_file') {
@@ -759,7 +851,6 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, `✅ فایل با موفقیت ثبت شد.\nنام: <b>${htmlEscape(meta.file_name)}</b>\nقیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${meta.max_users||0}</b>\nلینک مستقیم: ${link}${deepLink ? `\nلینک دعوت دریافت در ربات: ${deepLink}` : ''}`);
         return;
       }
-      // no adm_cost state anymore
       // Admin flows
       if (isAdminUser(env, uid)) {
         if (state?.step === 'adm_join_wait') {
@@ -819,6 +910,19 @@ async function onMessage(msg, env) {
           const ok = await subtractBalance(env, state.target, amount);
           await tgSendMessage(env, chat_id, ok ? `✅ ${fmtNum(amount)} سکه از کاربر ${state.target} کسر شد.` : '❌ انجام نشد (شاید موجودی کافی نیست).');
           await clearUserState(env, uid);
+          return;
+        }
+        if (state?.step === 'buy_reject_reason' && state?.purchase_id && state?.target_uid) {
+          const reason = (msg.text || '').trim() || 'بدون دلیل';
+          const key = CONFIG.PURCHASE_PREFIX + state.purchase_id;
+          const p = await kvGet(env, key);
+          if (p && p.status === 'pending') {
+            p.status = 'rejected'; p.reason = reason; p.decided_at = nowTs();
+            await kvSet(env, key, p);
+            try { await tgSendMessage(env, state.target_uid, `❌ خرید شما رد شد.\nدلیل: ${reason}`); } catch {}
+          }
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, 'دلیل رد برای کاربر ارسال شد.');
           return;
         }
       }
@@ -917,8 +1021,6 @@ async function onCallback(cb, env) {
       return;
     }
 
-    // انتقال سکه برای کاربران حذف شد
-
     if (data === 'giftcode') {
       await setUserState(env, uid, { step: 'giftcode_wait' });
       await tgSendMessage(env, chat_id, '🎁 لطفاً کد هدیه را ارسال کنید. /update برای لغو');
@@ -934,7 +1036,49 @@ async function onCallback(cb, env) {
     }
 
     if (data === 'buy_coins') {
-      await tgSendMessage(env, chat_id, `🪙 خرید سکه\nبرای خرید سکه با پشتیبانی تماس بگیرید: https://t.me/NeoDebug`);
+      // لیست پلن‌ها
+      let plans = CONFIG.PLANS;
+      try { const s = await getSettings(env); if (Array.isArray(s.plans) && s.plans.length) plans = s.plans; } catch {}
+      const rows = plans.map(p => ([{ text: `${p.coins} ${CONFIG.DEFAULT_CURRENCY} — ${p.price_label}`, callback_data: 'buy_plan:' + p.id }]));
+      rows.push([{ text: '🔙 بازگشت', callback_data: 'back_main' }]);
+      await tgSendMessage(env, chat_id, '🪙 یکی از پلن‌های زیر را انتخاب کنید:', kb(rows));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data.startsWith('buy_plan:')) {
+      let plans = CONFIG.PLANS;
+      try { const s = await getSettings(env); if (Array.isArray(s.plans) && s.plans.length) plans = s.plans; } catch {}
+      const planId = data.split(':')[1];
+      const plan = plans.find(p => p.id === planId);
+      if (!plan) { await tgAnswerCallbackQuery(env, cb.id, 'پلن یافت نشد'); return; }
+      const card = CONFIG.CARD_INFO;
+      const txt = [
+        'اطلاعات پرداخت',
+        `پلن انتخابی: ${plan.coins} ${CONFIG.DEFAULT_CURRENCY}`,
+        `مبلغ: ${plan.price_label}`,
+        `شماره کارت: ${card.card_number}`,
+        `به نام: ${card.holder_name}`,
+        '',
+        card.pay_note,
+      ].join('\n');
+      await setUserState(env, uid, { step: 'buy_wait_receipt', plan_id: plan.id, coins: plan.coins, amount_label: plan.price_label });
+      const kbPaid = kb([[{ text: '✅ پرداخت کردم، ارسال رسید', callback_data: 'buy_paid:' + plan.id }], [{ text: '🔙 بازگشت', callback_data: 'back_main' }]]);
+      await tgEditMessage(env, chat_id, mid, txt, kbPaid);
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data.startsWith('buy_paid:')) {
+      // راهنمای ارسال رسید + حفظ اطلاعات پلن انتخاب‌شده
+      const planId = (data.split(':')[1] || '');
+      let plans = CONFIG.PLANS;
+      try { const s = await getSettings(env); if (Array.isArray(s.plans) && s.plans.length) plans = s.plans; } catch {}
+      const plan = plans.find(p => p.id === planId);
+      const coins = plan ? plan.coins : undefined;
+      const amount_label = plan ? plan.price_label : undefined;
+      await setUserState(env, uid, { step: 'buy_wait_receipt', plan_id: planId, coins, amount_label });
+      await tgSendMessage(env, chat_id, 'لطفاً رسید پرداخت را به صورت عکس یا فایل ارسال کنید.');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -985,13 +1129,56 @@ async function onCallback(cb, env) {
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
+      if (data === 'adm_service') {
+        const s = await getSettings(env);
+        const enabled = s?.service_enabled !== false;
+        const txt = `⚙️ تنظیمات سرویس\nوضعیت فعلی: ${enabled ? 'فعال' : 'غیرفعال'}`;
+        const kbSrv = kb([[{ text: enabled ? '🟡 غیرفعال کردن سرویس' : '🟢 فعال کردن سرویس', callback_data: 'adm_service_toggle' }], [{ text: '🔙 بازگشت', callback_data: 'back_main' }]]);
+        await tgEditMessage(env, chat_id, mid, txt, kbSrv);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_service_toggle') {
+        const s = await getSettings(env);
+        s.service_enabled = s?.service_enabled === false ? true : false;
+        await setSettings(env, s);
+        const txt = `⚙️ تنظیمات سرویس\nوضعیت فعلی: ${s.service_enabled !== false ? 'فعال' : 'غیرفعال'}`;
+        const kbSrv = kb([[{ text: s.service_enabled !== false ? '🟡 غیرفعال کردن سرویس' : '🟢 فعال کردن سرویس', callback_data: 'adm_service_toggle' }], [{ text: '🔙 بازگشت', callback_data: 'back_main' }]]);
+        await tgEditMessage(env, chat_id, mid, txt, kbSrv);
+        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        return;
+      }
+      if (data.startsWith('buy_approve:')) {
+        const pid = data.split(':')[1];
+        const key = CONFIG.PURCHASE_PREFIX + pid;
+        const p = await kvGet(env, key);
+        if (!p || p.status !== 'pending') { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        const ok = await creditBalance(env, String(p.user_id), Number(p.coins || 0));
+        if (ok) {
+          p.status = 'approved'; p.decided_at = nowTs(); await kvSet(env, key, p);
+          try { await tgSendMessage(env, String(p.user_id), `✅ ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد. سپاس از پرداخت شما.`); } catch {}
+          await tgAnswerCallbackQuery(env, cb.id, 'واریز شد');
+        } else {
+          await tgAnswerCallbackQuery(env, cb.id, 'خطا در واریز');
+        }
+        return;
+      }
+      if (data.startsWith('buy_reject:')) {
+        const pid = data.split(':')[1];
+        const key = CONFIG.PURCHASE_PREFIX + pid;
+        const p = await kvGet(env, key);
+        if (!p || p.status !== 'pending') { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        await setUserState(env, uid, { step: 'buy_reject_reason', purchase_id: pid, target_uid: String(p.user_id) });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'لطفاً دلیل رد خرید را ارسال کنید:');
+        return;
+      }
       if (data === 'adm_upload') {
         await setUserState(env, uid, { step: 'adm_upload_wait_file' });
         await tgEditMessage(env, chat_id, mid, '⬆️ فایل خود را به صورت Document ارسال کنید تا بارگذاری شود.', {});
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
-      // adm_toggle removed per request
       if (data === 'adm_update_toggle') {
         const settings = await getSettings(env);
         settings.update_mode = settings.update_mode ? false : true;
@@ -1002,7 +1189,10 @@ async function onCallback(cb, env) {
       }
       if (data === 'adm_stats') {
         const stats = await getStats(env);
-        const txt = `📊 آمار:\nبه‌روزرسانی‌ها: ${fmtNum(stats.updates || 0)}\nفایل‌ها: ${fmtNum(stats.files || 0)}`;
+        const users = fmtNum(stats.users || 0);
+        const files = fmtNum(stats.files || 0);
+        const updates = fmtNum(stats.updates || 0);
+        const txt = `📊 آمار ربات\nکاربران: ${users}\nفایل‌ها: ${files}\nبه‌روزرسانی‌ها: ${updates}`;
         await tgAnswerCallbackQuery(env, cb.id);
         await tgEditMessage(env, chat_id, mid, txt, adminMenuKb(await getSettings(env)));
         return;
@@ -1024,6 +1214,27 @@ async function onCallback(cb, env) {
         }
         await tgAnswerCallbackQuery(env, cb.id);
         await tgEditMessage(env, chat_id, mid, txt, adminMenuKb(await getSettings(env)));
+        return;
+      }
+      if (data === 'help') {
+        const lines = [
+          '📘 راهنمای دستورات',
+          '',
+          'دستورات عمومی:',
+          '/start — شروع و نمایش منوی اصلی',
+          '/update — بروزرسانی منو و لغو فرآیندهای در حال انجام',
+          '',
+          'از منوی ربات:',
+          '👤 حساب کاربری — مشاهده آیدی، نام و موجودی',
+          '👥 معرفی دوستان — دریافت لینک دعوت و مشاهده تعداد معرفی‌ها',
+          '🎁 کد هدیه — ثبت کد هدیه و افزایش موجودی',
+          '🔑 دریافت با توکن — واردکردن توکن ۶ کاراکتری برای دریافت فایل',
+          '🪙 خرید سکه — انتخاب پلن، مشاهده اطلاعات پرداخت و ارسال رسید',
+          '',
+          'ارسال فایل (Document) — ذخیره فایل و دریافت لینک (برای مدیران در بخش آپلود پیشرفته قابل قیمت‌گذاری/محدودسازی است)',
+        ];
+        await tgEditMessage(env, chat_id, mid, lines.join('\n'), kb([[{ text: '🔙 بازگشت', callback_data: 'back_main' }]]));
+        await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data === 'adm_backup') {
@@ -1267,7 +1478,7 @@ async function routerFetch(request, env, ctx) {
       return await handleFileDownload(request, env);
     }
 
-    // Root → redirect to /admin
+    // Root → status page
     if (path === '/' || path === '') {
       return await handleRoot(request, env);
     }
@@ -1344,8 +1555,5 @@ function renderStatusPage(settings, stats, envSummary = {}) {
 </body>
 </html>`;
 }
-
-// پیام‌ها را به تیکت تبدیل نمی‌کنیم؛ فقط راهنمایی ساده، ولی می‌توانید پیام‌های آزاد را ذخیره کنید.
-
 // 11) Expose app via global (avoid ESM export for Wrangler)
 globalThis.APP = { fetch: routerFetch };
