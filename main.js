@@ -818,49 +818,27 @@ async function getShareLink(env, token) {
 }
 async function buildDynamicMainMenu(env, uid) {
   const isAdminUser = isAdmin(uid);
-  const settings = await getSettings(env);
-
-  // Build rows explicitly per requested order, checking for disabled buttons
   const rows = [];
-  
-  // Row 1: Account | Referral
-  const row1 = [];
-  if (!isButtonDisabledCached(settings, 'SUB:ACCOUNT')) {
-    row1.push({ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' });
-  }
-  if (!isButtonDisabledCached(settings, 'SUB:REFERRAL')) {
-    row1.push({ text: '👥 زیرمجموعه گیری', callback_data: 'SUB:REFERRAL' });
-  }
-  if (row1.length > 0) rows.push(row1);
 
-  // Row 2: Get by token | Gift code
-  const row2 = [];
-  if (!isButtonDisabledCached(settings, 'GET_BY_TOKEN')) {
-    row2.push({ text: '🔑 دریافت با توکن', callback_data: 'GET_BY_TOKEN' });
-  }
-  if (!isButtonDisabledCached(settings, 'REDEEM_GIFT')) {
-    row2.push({ text: '🎁 کد هدیه', callback_data: 'REDEEM_GIFT' });
-  }
-  if (row2.length > 0) rows.push(row2);
+  // Row 1: Referral | Account
+  rows.push([
+    { text: '👥 زیرمجموعه گیری', callback_data: 'SUB:REFERRAL' },
+    { text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }
+  ]);
 
-  // Row 3: Buy coins (admins also see My Files appended on this row)
-  const row3 = [];
-  if (!isButtonDisabledCached(settings, 'BUY_DIAMONDS')) {
-    row3.push({ text: '💳 خرید سکه', callback_data: 'BUY_DIAMONDS' });
-  }
+  // Row 2: Gift Code | Get by Token
+  rows.push([
+    { text: '🎁 کد هدیه', callback_data: 'REDEEM_GIFT' },
+    { text: '🔑 دریافت با توکن', callback_data: 'GET_BY_TOKEN' }
+  ]);
+
+  // Row 3: Buy Coins
+  rows.push([{ text: '💳 خرید سکه', callback_data: 'BUY_DIAMONDS' }]);
+
+  // Row 4 (admin only): Admin Panel and My Files
   if (isAdminUser) {
-    row3.push({ text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' });
-  }
-  if (row3.length > 0) rows.push(row3);
-
-  // Bottom: Admin Panel (only for admins)
-  if (isAdminUser) {
+    rows.push([{ text: '📂 مدیریت فایل‌ها', callback_data: 'MYFILES:0' }]);
     rows.push([{ text: '🛠 پنل مدیریت', callback_data: 'ADMIN:PANEL' }]);
-  }
-
-  // Ensure we always have at least one button (fallback)
-  if (rows.length === 0) {
-    rows.push([{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }]);
   }
 
   return { inline_keyboard: rows };
@@ -1031,18 +1009,8 @@ async function sendMainMenu(env, chatId, uid, opts = {}) {
     }
   } catch (_) {}
 
-  const menu = await (async () => {
-    try { return await buildDynamicMainMenu(env, uid); } catch (_) { return { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }]] }; }
-  })();
-  const replyMarkup = { inline_keyboard: (menu && Array.isArray(menu.inline_keyboard) && menu.inline_keyboard.length ? menu.inline_keyboard : [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }]]) };
-  try {
-    const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyMarkup });
-    if (!res || !res.ok) throw new Error('send_failed');
-  } catch (_) {
-    // Last-resort minimal inline keyboard to force buttons to appear
-    const minimal = { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] };
-    await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: minimal });
-  }
+  const replyMarkup = await buildDynamicMainMenu(env, uid);
+  await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyMarkup });
 }
 
 /* ==================== 9) Telegram webhook handling ==================== */
