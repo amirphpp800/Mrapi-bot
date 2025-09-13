@@ -196,8 +196,8 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '2.0';
-  } catch { return '2.0'; }
+    return s?.bot_version || '2.1';
+  } catch { return '2.1'; }
 }
 
 // ------------------ Build main menu header text ------------------ //
@@ -738,16 +738,14 @@ async function handleFileDownload(request, env) {
         return new Response('ظرفیت دریافت این فایل تکمیل شده است.', { status: 403 });
       }
       if (price > 0 && !isOwner && !alreadyPaid) {
-        const u = await getUser(env, String(uid));
-        if (!u || Number(u.balance || 0) < price) {
-          return new Response('موجودی شما برای دریافت فایل کافی نیست.', { status: 402 });
+        // به جای کسر در این مسیر، کاربر را برای تایید به ربات هدایت کن
+        const botUser = await getBotUsername(env);
+        if (botUser) {
+          const deep = `https://t.me/${botUser}?start=${token}`;
+          return Response.redirect(deep, 302);
         }
-        // کسر سکه و ثبت کاربر
-        u.balance = Number(u.balance || 0) - price;
-        await setUser(env, String(uid), u);
-        paidUsers.push(String(uid));
-        meta.paid_users = paidUsers;
-        await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+        // اگر نام ربات را نداریم، با پیام خطا مواجه شویم
+        return new Response('برای دریافت این فایل ابتدا به ربات مراجعه کنید و تایید کنید.', { status: 402 });
       }
       if (!already) {
         users.push(String(uid));
