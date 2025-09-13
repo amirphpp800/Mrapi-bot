@@ -482,77 +482,55 @@ async function buildJoinKb(env) {
 async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
   try {
     const s = await getSettings(env);
-    const src = (s?.join_channels && Array.isArray(s.join_channels) ? s.join_channels.join(',') : '');
-    const channels = String(src || '')
-      .split(',').map(s => s.trim()).filter(Boolean);
+    // Accept both array and comma-separated string configs
+    let channels = [];
+    if (Array.isArray(s?.join_channels)) {
+      channels = s.join_channels.map(x => String(x || '').trim()).filter(Boolean);
+    } else if (s?.join_channels) {
+      channels = String(s.join_channels).split(',').map(x => x.trim()).filter(Boolean);
+    }
     if (!channels.length) return true; // No mandatory channels configured
-    // Try to check membership; if API fails, show prompt
-    for (const ch of channels) {
+
+    // Try to check membership; if API fails, optionally show prompt
+    for (const chRaw of channels) {
       try {
-        // پشتیبانی از ورودی‌های مختلف: @username ، -100id ، یا لینک t.me
+        // Support @username, -100id, or t.me links
         let chat = '';
+        const ch = String(chRaw).trim();
+        if (!ch) continue;
         if (ch.startsWith('http')) {
-          // تلاش برای استخراج یوزرنیم از لینک t.me
+          // Attempt to extract username from t.me/<username>
           try {
             const u = new URL(ch);
             const host = u.hostname.replace(/^www\./, '');
             const seg = (u.pathname || '').split('/').filter(Boolean)[0] || '';
-            // اگر لینک از نوع t.me/<username> بود
             if ((host === 't.me' || host === 'telegram.me') && seg && seg.toLowerCase() !== 'joinchat') {
               chat = '@' + seg;
             } else {
-              // لینک دعوت خصوصی یا ناشناس → امکان چک membership نیست؛ از این مورد صرف‌نظر می‌کنیم
+              // Private/Invite links cannot be verified by getChatMember
               chat = '';
             }
-        if (state?.step === 'adm_ticket_reply' && state?.ticket_id && state?.target_uid) {
-          const replyText = (text || '').trim();
-          const t = await getTicket(env, state.ticket_id);
-          if (t) {
-            t.replies = Array.isArray(t.replies) ? t.replies : [];
-            t.replies.push({ from_admin: true, text: replyText, ts: nowTs() });
-            t.status = 'answered';
-            await saveTicket(env, t);
-            try { await tgSendMessage(env, state.target_uid, `📩 پاسخ پشتیبانی:\n${replyText}`); } catch {}
-          }
-          await clearUserState(env, uid);
-          await tgSendMessage(env, chat_id, 'پاسخ ارسال شد.');
-          return;
-        }
-          } catch {
-            chat = '';
-          }
+          } catch { chat = ''; }
         } else if (ch.startsWith('@') || /^-100/.test(ch)) {
           chat = ch;
         } else {
-          chat = `@${ch}`;
+          chat = '@' + ch;
         }
 
-    // تایید یا لغو خرید فایل پولی با توکن
-    if (data.startsWith('confirm_buy:')) {
-      const t = data.split(':')[1];
-      await tgAnswerCallbackQuery(env, cb.id);
-      const ok = await deliverFileToUser(env, uid, chat_id, t);
-      if (!ok) {
-        await tgSendMessage(env, chat_id, 'دریافت فایل انجام نشد.');
-      }
-      return;
-    }
-    if (data === 'cancel_buy') {
-      await tgAnswerCallbackQuery(env, cb.id, 'لغو شد');
-      await tgSendMessage(env, chat_id, 'دریافت فایل لغو شد.');
-      return;
-    }
-
-        // اگر قابل بررسی نبود، از این کانال عبور می‌کنیم
+        // If not verifiable, skip this entry
         if (!chat) continue;
+
         const res = await tgGetChatMember(env, chat, uid);
         const status = res?.result?.status;
-        if (!status || ['left', 'kicked'].includes(status)) {
-          if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
+        const isMember = status && !['left', 'kicked'].includes(status);
+        if (!isMember) {
+          if (!silent) {
+            await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
+          }
           return false;
         }
       } catch (e) {
-        // در خطاهای موقت تلگرام، کاربر را مزاحم نکنیم؛ فقط اگر silent=false باشد یک بار راهنما می‌فرستیم
+        // On temporary Telegram errors, avoid blocking; optionally show guide
         if (!silent) {
           await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
         }
@@ -560,16 +538,6 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
       }
     }
 
-    // پشتیبانی از متن/لینک در فلو آپلود ادمین
-    if (text && isAdminUser(env, uid)) {
-      const st2 = await getUserState(env, uid);
-      if (st2?.step === 'adm_upload_wait_file') {
-        const tmp = { kind: 'text', text, file_name: (text.length > 40 ? text.slice(0, 40) + '…' : text), file_size: text.length, mime_type: 'text/plain' };
-        await setUserState(env, uid, { step: 'adm_upload_price', tmp });
-        await tgSendMessage(env, chat_id, '💰 قیمت فایل به سکه را ارسال کنید (مثلاً 10):');
-        return;
-      }
-    }
     return true;
   } catch (e) {
     console.error('ensureJoinedChannels error', e);
