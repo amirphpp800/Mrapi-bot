@@ -40,7 +40,6 @@ const CONFIG = {
   FILE_PREFIX: 'file:',
   TICKET_PREFIX: 'ticket:',
   DOWNLOAD_LOG_PREFIX: 'dl:',
-  // پنل وب ادمین حذف شد
 };
 
 // صفحات فانکشنز env: { BOT_KV }
