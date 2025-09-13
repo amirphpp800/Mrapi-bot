@@ -1034,7 +1034,15 @@ async function sendMainMenu(env, chatId, uid, opts = {}) {
   const menu = await (async () => {
     try { return await buildDynamicMainMenu(env, uid); } catch (_) { return { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }]] }; }
   })();
-  await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: menu });
+  const replyMarkup = { inline_keyboard: (menu && Array.isArray(menu.inline_keyboard) && menu.inline_keyboard.length ? menu.inline_keyboard : [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }]]) };
+  try {
+    const res = await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: replyMarkup });
+    if (!res || !res.ok) throw new Error('send_failed');
+  } catch (_) {
+    // Last-resort minimal inline keyboard to force buttons to appear
+    const minimal = { inline_keyboard: [[{ text: '👤 حساب کاربری', callback_data: 'SUB:ACCOUNT' }], [{ text: '🏠 منو', callback_data: 'MENU' }]] };
+    await tgApi('sendMessage', { chat_id: chatId, text: 'لطفا یک گزینه را انتخاب کنید:', reply_markup: minimal });
+  }
 }
 
 /* ==================== 9) Telegram webhook handling ==================== */
