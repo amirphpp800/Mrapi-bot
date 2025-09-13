@@ -301,16 +301,34 @@ async function tgGetChatMember(env, chat_id, user_id) {
 }
 
 // Mandatory join check utilities
-function joinMenuKb(env) {
-  const channels = String(env?.JOIN_CHANNELS || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
-  const rows = [];
-  for (const ch of channels) {
-    const url = ch.startsWith('http') ? ch : `https://t.me/${ch.replace(/^@/, '')}`;
-    rows.push([{ text: `عضویت در ${ch}`, url }]);
+function normalizeChannelToken(token) {
+  const t = String(token || '').trim();
+  if (!t) return '';
+  if (t.startsWith('http')) return t;
+  if (t.startsWith('@') || t.startsWith('-100')) return t;
+  return '@' + t;
+}
+
+async function buildJoinKb(env) {
+  try {
+    const s = await getSettings(env);
+    const src = (s?.join_channels && Array.isArray(s.join_channels) ? s.join_channels : [])
+      .filter(Boolean);
+    const fallback = String(env?.JOIN_CHANNELS || '')
+      .split(',').map(x => x.trim()).filter(Boolean);
+    const channels = src.length ? src : fallback;
+    const rows = [];
+    for (const chRaw of channels) {
+      const ch = chRaw.trim();
+      if (!ch) continue;
+      const url = ch.startsWith('http') ? ch : `https://t.me/${ch.replace(/^@/, '')}`;
+      rows.push([{ text: `عضویت در ${ch}`, url }]);
+    }
+    rows.push([{ text: '✅ بررسی عضویت', callback_data: 'join_check' }]);
+    return { reply_markup: { inline_keyboard: rows } };
+  } catch {
+    return { reply_markup: { inline_keyboard: [[{ text: '✅ بررسی عضویت', callback_data: 'join_check' }]] } };
   }
-  rows.push([{ text: '✅ بررسی عضویت', callback_data: 'join_check' }]);
-  return { reply_markup: { inline_keyboard: rows } };
 }
 
 async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
@@ -327,12 +345,12 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
         const res = await tgGetChatMember(env, chat, uid);
         const status = res?.result?.status;
         if (!status || ['left', 'kicked'].includes(status)) {
-          if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', joinMenuKb(env));
+          if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
           return false;
         }
       } catch (e) {
         // On error, prompt to join
-        if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', joinMenuKb(env));
+        if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', await buildJoinKb(env));
         return false;
       }
     }
@@ -669,15 +687,17 @@ async function onMessage(msg, env) {
       // Admin flows
       if (isAdminUser(env, uid)) {
         if (state?.step === 'adm_join_wait') {
-          const list = String(text || '')
-            .split(',')
-            .map(s => s.trim())
-            .filter(Boolean);
+          const token = normalizeChannelToken(text);
+          if (!token) {
+            await tgSendMessage(env, chat_id, '❌ کانال نامعتبر است. نمونه: @channel یا لینک کامل');
+            return;
+          }
           const s = await getSettings(env);
-          s.join_channels = list;
+          const arr = Array.isArray(s.join_channels) ? s.join_channels : [];
+          if (!arr.includes(token)) arr.push(token);
+          s.join_channels = arr;
           await setSettings(env, s);
-          await clearUserState(env, uid);
-          await tgSendMessage(env, chat_id, `✅ کانال‌های جویین اجباری بروزرسانی شد: ${list.join(', ') || '—'}`);
+          await tgSendMessage(env, chat_id, `✅ افزوده شد: ${token}\nکانال‌های فعلی: ${arr.join(', ') || '—'}\nمی‌توانید کانال بعدی را ارسال کنید یا با /update خارج شوید.`);
           return;
         }
         if (state?.step === 'adm_gift_create_amount') {
@@ -894,7 +914,7 @@ async function onCallback(cb, env) {
         const s = await getSettings(env);
         const current = Array.isArray(s.join_channels) ? s.join_channels.join(', ') : '';
         await setUserState(env, uid, { step: 'adm_join_wait' });
-        const txt = `📡 تنظیم جویین اجباری\nکانال‌های فعلی: ${current || '—'}\n\nلیست کانال‌ها را به صورت کاما (,) جدا کنید ارسال نمایید.\nمثال: @channel1, @channel2 یا لینک کامل`;
+        const txt = `📢 تنظیم جویین اجباری\nکانال‌های فعلی: ${current || '—'}\n\nلطفاً یک کانال یا لینک در هر پیام ارسال کنید.\nنمونه‌ها: @channel یا -100xxxxxxxxxx یا لینک کامل https://t.me/xxxx`;
         await tgEditMessage(env, chat_id, mid, txt, {});
         await tgAnswerCallbackQuery(env, cb.id);
         return;
