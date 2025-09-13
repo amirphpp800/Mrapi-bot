@@ -40,10 +40,80 @@ const CONFIG = {
   FILE_PREFIX: 'file:',
   TICKET_PREFIX: 'ticket:',
   DOWNLOAD_LOG_PREFIX: 'dl:',
+  GIFT_PREFIX: 'gift:',
+  REDEEM_PREFIX: 'redeem:',
 };
 
 // صفحات فانکشنز env: { BOT_KV }
-// export default شیء حاوی fetch
+
+// Ticket storage
+async function createTicket(env, uid, content) {
+  try {
+    const id = newToken(10);
+    const t = { id, user_id: uid, content: String(content || ''), created_at: nowTs(), closed: false };
+    await kvSet(env, CONFIG.TICKET_PREFIX + id, t);
+    return t;
+  } catch (e) { console.error('createTicket error', e); return null; }
+}
+
+async function listTickets(env, limit = 10) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.TICKET_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (v) items.push(v);
+    }
+    items.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    return items.slice(0, limit);
+  } catch (e) { console.error('listTickets error', e); return []; }
+}
+
+// Gift codes
+async function createGiftCode(env, amount) {
+  try {
+    const code = newToken(10);
+    const obj = { code, amount: Number(amount || 0), created_at: nowTs(), used_by: null };
+    await kvSet(env, CONFIG.GIFT_PREFIX + code, obj);
+    return obj;
+  } catch (e) { console.error('createGiftCode error', e); return null; }
+}
+
+async function listGiftCodes(env, limit = 10) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.GIFT_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (v) items.push(v);
+    }
+    items.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    return items.slice(0, limit);
+  } catch (e) { console.error('listGiftCodes error', e); return []; }
+}
+
+async function creditBalance(env, uid, amount) {
+  try {
+    const u = await getUser(env, uid);
+    if (!u) return false;
+    u.balance = Number(u.balance || 0) + Number(amount || 0);
+    await setUser(env, uid, u);
+    return true;
+  } catch (e) { console.error('creditBalance error', e); return false; }
+}
+
+async function subtractBalance(env, uid, amount) {
+  try {
+    const u = await getUser(env, uid);
+    if (!u) return false;
+    const amt = Number(amount || 0);
+    if (!amt || amt <= 0) return false;
+    if ((u.balance || 0) < amt) return false;
+    u.balance = Number(u.balance || 0) - amt;
+    await setUser(env, uid, u);
+    return true;
+  } catch (e) { console.error('subtractBalance error', e); return false; }
+}
 
 // =========================================================
 // 2) KV Helpers
@@ -165,6 +235,57 @@ function tgFileDirectUrl(env, file_path) {
   return `https://api.telegram.org/file/bot${token}/${file_path}`;
 }
 
+// Get chat member (for mandatory join)
+async function tgGetChatMember(env, chat_id, user_id) {
+  try {
+    const res = await fetch(tgApiUrl('getChatMember', env), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id, user_id })
+    });
+    return await res.json();
+  } catch (e) { console.error('tgGetChatMember error', e); return null; }
+}
+
+// Mandatory join check utilities
+function joinMenuKb(env) {
+  const channels = String(env?.JOIN_CHANNELS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const rows = [];
+  for (const ch of channels) {
+    const url = ch.startsWith('http') ? ch : `https://t.me/${ch.replace(/^@/, '')}`;
+    rows.push([{ text: `عضویت در ${ch}`, url }]);
+  }
+  rows.push([{ text: '✅ بررسی عضویت', callback_data: 'join_check' }]);
+  return { reply_markup: { inline_keyboard: rows } };
+}
+
+async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
+  try {
+    const channels = String(env?.JOIN_CHANNELS || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    if (!channels.length) return true; // No mandatory channels configured
+    // Try to check membership; if API fails, show prompt
+    for (const ch of channels) {
+      try {
+        const chat = ch.startsWith('@') || /^-100/.test(ch) ? ch : `@${ch}`;
+        const res = await tgGetChatMember(env, chat, uid);
+        const status = res?.result?.status;
+        if (!status || ['left', 'kicked'].includes(status)) {
+          if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', joinMenuKb(env));
+          return false;
+        }
+      } catch (e) {
+        // On error, prompt to join
+        if (!silent) await tgSendMessage(env, chat_id, 'برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه بررسی را بزنید:', joinMenuKb(env));
+        return false;
+      }
+    }
+    return true;
+  } catch (e) {
+    console.error('ensureJoinedChannels error', e);
+    return true; // Fail-open to avoid blocking on unexpected errors
+  }
+}
+
 // =========================================================
 // 4) Utility Helpers
 // =========================================================
@@ -195,13 +316,16 @@ function isAdminUser(env, uid) {
   return false;
 }
 
-function mainMenuKb() {
-  return kb([
-    [ { text: '📁 مدیریت فایل‌ها', callback_data: 'fm' } ],
-    [ { text: '👤 پروفایل', callback_data: 'profile' }, { text: '🎁 هدایا', callback_data: 'gifts' } ],
-    [ { text: '🎫 تیکت‌ها', callback_data: 'tickets' }, { text: '💸 انتقال سکه', callback_data: 'transfer' } ],
-    [ { text: '🔄 بروزرسانی /update', callback_data: 'update' } ],
-  ]);
+function mainMenuKb(env, uid) {
+  const rows = [
+    [ { text: '👤 حساب کاربری', callback_data: 'account' }, { text: '👥 معرفی دوستان', callback_data: 'referrals' } ],
+    [ { text: '🎟 کد هدیه', callback_data: 'giftcode' }, { text: '🔑 دریافت با توکن', callback_data: 'redeem_token' } ],
+    [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
+  ];
+  if (isAdminUser(env, uid)) {
+    rows.push([ { text: '🛠 پنل ادمین', callback_data: 'admin' } ]);
+  }
+  return kb(rows);
 }
 
 function fmMenuKb() {
@@ -213,11 +337,12 @@ function fmMenuKb() {
 
 function adminMenuKb(settings) {
   const enabled = settings?.service_enabled !== false;
+  const updating = settings?.update_mode === true;
   return kb([
-    [ { text: enabled ? '🟢 سرویس فعال' : '🔴 سرویس غیرفعال', callback_data: 'adm_toggle' } ],
-    [ { text: '📊 آمار لحظه‌ای', callback_data: 'adm_stats' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
-    [ { text: '⚙️ تنظیمات هزینه', callback_data: 'adm_cost' }, { text: '🧰 بکاپ', callback_data: 'adm_backup' } ],
-    [ { text: '🔙 بازگشت', callback_data: 'back_main' } ],
+    [ { text: enabled ? '🟢 سرویس فعال' : '🔴 سرویس غیرفعال', callback_data: 'adm_toggle' }, { text: updating ? '🔧 حالت بروزرسانی: روشن' : '🔧 حالت بروزرسانی: خاموش', callback_data: 'adm_update_toggle' } ],
+    [ { text: '📊 آمار ربات', callback_data: 'adm_stats' }, { text: '🗂 مدیریت فایل‌ها', callback_data: 'adm_files' } ],
+    [ { text: '🎁 مدیریت کدهای هدیه', callback_data: 'adm_gifts' }, { text: '🎟 مدیریت تیکت‌ها', callback_data: 'adm_tickets' } ],
+    [ { text: '➕ افزودن سکه', callback_data: 'adm_add' }, { text: '➖ کسر سکه', callback_data: 'adm_sub' } ],
   ]);
 }
 
@@ -235,6 +360,8 @@ async function handleRoot(request, env) {
       adminIdSet: Boolean((env?.ADMIN_ID || '').trim()),
       adminIdsSet: Boolean((env?.ADMIN_IDS || '').trim()),
       kvBound: Boolean(env?.BOT_KV),
+      botUsernameSet: Boolean((env?.BOT_USERNAME || '').trim()),
+      joinChannelsSet: Boolean((env?.JOIN_CHANNELS || '').trim()),
     };
     // Small KV snapshot: settings + stats
     const kvSnapshot = { settings, stats };
@@ -324,6 +451,10 @@ async function onMessage(msg, env) {
     const uid = String(from.id);
     await ensureUser(env, uid, from);
 
+    // Mandatory join check
+    const joined = await ensureJoinedChannels(env, uid, chat_id);
+    if (!joined) return; // A join prompt has been shown
+
     // دستورات متنی
     const text = msg.text || msg.caption || '';
     if (text.startsWith('/start')) {
@@ -332,7 +463,7 @@ async function onMessage(msg, env) {
     }
     if (text.startsWith('/update')) {
       await clearUserState(env, uid);
-      await tgSendMessage(env, chat_id, 'عملیات جاری لغو شد. منو اصلی:', mainMenuKb());
+      await tgSendMessage(env, chat_id, 'عملیات جاری لغو شد. منو اصلی:', mainMenuKb(env, uid));
       return;
     }
 
@@ -367,9 +498,76 @@ async function onMessage(msg, env) {
       return;
     }
 
-    // سایر متن‌ها → نمایش منو
+    // سایر متن‌ها → نمایش منو و مدیریت stateها
     if (text) {
-      await tgSendMessage(env, chat_id, 'لطفاً از منو استفاده کنید:', mainMenuKb());
+      // Handle stateful flows for giftcode/redeem
+      const state = await getUserState(env, uid);
+      if (state?.step === 'giftcode_wait') {
+        const code = text.trim();
+        await handleGiftCodeRedeem(env, uid, chat_id, code);
+        return;
+      }
+      if (state?.step === 'redeem_token_wait') {
+        const token = text.trim();
+        await handleTokenRedeem(env, uid, chat_id, token);
+        return;
+      }
+      if (state?.step === 'ticket_wait') {
+        const content = text.trim();
+        await createTicket(env, uid, content);
+        await tgSendMessage(env, chat_id, '✅ تیکت شما ثبت شد.');
+        await clearUserState(env, uid);
+        return;
+      }
+      // Admin flows
+      if (isAdminUser(env, uid)) {
+        if (state?.step === 'adm_gift_create_amount') {
+          const amount = Number(text.replace(/[^0-9]/g, ''));
+          if (!amount || amount <= 0) {
+            await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است. یک عدد معتبر ارسال کنید.');
+            return;
+          }
+          const g = await createGiftCode(env, amount);
+          if (g) {
+            await tgSendMessage(env, chat_id, `✅ کد هدیه ایجاد شد.\nکد: <code>${g.code}</code>\nمبلغ: ${fmtNum(g.amount)} ${CONFIG.DEFAULT_CURRENCY}`);
+          } else {
+            await tgSendMessage(env, chat_id, '❌ ایجاد کد هدیه ناموفق بود.');
+          }
+          await clearUserState(env, uid);
+          return;
+        }
+        if (state?.step === 'adm_add_uid') {
+          const target = text.trim();
+          if (!/^\d+$/.test(target)) { await tgSendMessage(env, chat_id, 'آیدی نامعتبر است.'); return; }
+          await setUserState(env, uid, { step: 'adm_add_amount', target });
+          await tgSendMessage(env, chat_id, 'مبلغ سکه برای افزودن را ارسال کنید:');
+          return;
+        }
+        if (state?.step === 'adm_add_amount') {
+          const amount = Number(text.replace(/[^0-9]/g, ''));
+          if (!amount || amount <= 0) { await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است.'); return; }
+          const ok = await creditBalance(env, state.target, amount);
+          await tgSendMessage(env, chat_id, ok ? `✅ ${fmtNum(amount)} سکه به کاربر ${state.target} افزوده شد.` : '❌ انجام نشد.');
+          await clearUserState(env, uid);
+          return;
+        }
+        if (state?.step === 'adm_sub_uid') {
+          const target = text.trim();
+          if (!/^\d+$/.test(target)) { await tgSendMessage(env, chat_id, 'آیدی نامعتبر است.'); return; }
+          await setUserState(env, uid, { step: 'adm_sub_amount', target });
+          await tgSendMessage(env, chat_id, 'مبلغ سکه برای کسر را ارسال کنید:');
+          return;
+        }
+        if (state?.step === 'adm_sub_amount') {
+          const amount = Number(text.replace(/[^0-9]/g, ''));
+          if (!amount || amount <= 0) { await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است.'); return; }
+          const ok = await subtractBalance(env, state.target, amount);
+          await tgSendMessage(env, chat_id, ok ? `✅ ${fmtNum(amount)} سکه از کاربر ${state.target} کسر شد.` : '❌ انجام نشد (شاید موجودی کافی نیست).');
+          await clearUserState(env, uid);
+          return;
+        }
+      }
+      await tgSendMessage(env, chat_id, 'لطفاً از منو استفاده کنید:', mainMenuKb(env, uid));
     }
   } catch (e) {
     console.error('onMessage error', e);
@@ -384,22 +582,47 @@ async function onCallback(cb, env) {
     const chat_id = cb.message?.chat?.id;
     const mid = cb.message?.message_id;
 
-    if (data === 'back_main') {
-      await tgEditMessage(env, chat_id, mid, 'منو اصلی:', mainMenuKb());
+    // Mandatory join check
+    const joined = await ensureJoinedChannels(env, uid, chat_id);
+    if (!joined && data !== 'join_check') {
+      await tgAnswerCallbackQuery(env, cb.id, 'ابتدا عضو کانال‌ها شوید');
+      return;
+    }
+
+    if (data === 'join_check') {
+      const ok = await ensureJoinedChannels(env, uid, chat_id, true);
+      if (ok) {
+        await tgEditMessage(env, chat_id, mid, '✅ عضویت شما تایید شد. منو اصلی:', mainMenuKb(env, uid));
+      }
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
-    if (data === 'profile') {
+    if (data === 'back_main') {
+      await tgEditMessage(env, chat_id, mid, 'منو اصلی:', mainMenuKb(env, uid));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data === 'account') {
       const u = await getUser(env, uid);
       const bal = fmtNum(u?.balance || 0);
-      await tgEditMessage(env, chat_id, mid, `👤 پروفایل شما\nآیدی: <code>${uid}</code>\nنام: <b>${htmlEscape(u?.name || '-')}</b>\nموجودی: <b>${bal} ${CONFIG.DEFAULT_CURRENCY}</b>`, mainMenuKb());
+      const kbAcc = kb([
+        [ { text: '🆘 پشتیبانی', url: 'https://t.me/NeoDebug' }, { text: '🎫 ارسال تیکت', callback_data: 'ticket_new' } ],
+        [ { text: '🔙 بازگشت', callback_data: 'back_main' } ]
+      ]);
+      await tgEditMessage(env, chat_id, mid, `👤 حساب کاربری\nآیدی: <code>${uid}</code>\nنام: <b>${htmlEscape(u?.name || '-')}</b>\nموجودی: <b>${bal} ${CONFIG.DEFAULT_CURRENCY}</b>`, kbAcc);
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
-    if (data === 'tickets') {
-      await tgEditMessage(env, chat_id, mid, '🎫 تیکت‌ها\nبرای ارسال پیام، همینجا پیام دهید یا از دستور /update برای لغو استفاده کنید.', mainMenuKb());
+    if (data === 'referrals') {
+      const u = await getUser(env, uid);
+      const count = Number(u?.ref_count || 0);
+      const botUser = env?.BOT_USERNAME || '';
+      const suffix = uid;
+      const link = botUser ? `https://t.me/${botUser}?start=${suffix}` : 'لینک در دسترس نیست (BOT_USERNAME را در env تنظیم کنید)';
+      await tgEditMessage(env, chat_id, mid, `👥 معرفی دوستان\nتعداد افراد معرفی‌شده: <b>${fmtNum(count)}</b>\nلینک دعوت: ${link}`, mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -411,8 +634,32 @@ async function onCallback(cb, env) {
       return;
     }
 
-    if (data === 'gifts') {
-      await tgEditMessage(env, chat_id, mid, '🎁 هدایا\nدر حال حاضر هدیه‌ای فعال نیست.', mainMenuKb());
+    if (data === 'giftcode') {
+      await setUserState(env, uid, { step: 'giftcode_wait' });
+      await tgEditMessage(env, chat_id, mid, '🎟 لطفاً کد هدیه را ارسال کنید. /update برای لغو', {});
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data === 'redeem_token') {
+      await setUserState(env, uid, { step: 'redeem_token_wait' });
+      await tgEditMessage(env, chat_id, mid, '🔑 لطفاً توکن دریافتی را ارسال کنید. /update برای لغو', {});
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data === 'buy_coins') {
+      const s = await getSettings(env);
+      const price = s?.price_per_coin || 0;
+      const info = price ? `قیمت هر سکه: <b>${fmtNum(price)}</b> تومان` : 'برای خرید سکه با پشتیبانی تماس بگیرید.';
+      await tgEditMessage(env, chat_id, mid, `🪙 خرید سکه\n${info}`, mainMenuKb(env, uid));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data === 'ticket_new') {
+      await setUserState(env, uid, { step: 'ticket_wait' });
+      await tgEditMessage(env, chat_id, mid, '🎫 لطفاً متن تیکت خود را ارسال کنید. /update برای لغو', {});
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -444,7 +691,7 @@ async function onCallback(cb, env) {
 
     if (data === 'update') {
       await clearUserState(env, uid);
-      await tgEditMessage(env, chat_id, mid, 'عملیات جاری لغو شد. منو اصلی:', mainMenuKb());
+      await tgEditMessage(env, chat_id, mid, 'عملیات جاری لغو شد. منو اصلی:', mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -463,6 +710,14 @@ async function onCallback(cb, env) {
         settings.service_enabled = !enabled ? true : false;
         await setSettings(env, settings);
         await tgAnswerCallbackQuery(env, cb.id, settings.service_enabled ? 'سرویس فعال شد' : 'سرویس غیرفعال شد');
+        await tgEditMessage(env, chat_id, mid, 'پنل مدیریت:', adminMenuKb(settings));
+        return;
+      }
+      if (data === 'adm_update_toggle') {
+        const settings = await getSettings(env);
+        settings.update_mode = settings.update_mode ? false : true;
+        await setSettings(env, settings);
+        await tgAnswerCallbackQuery(env, cb.id, settings.update_mode ? 'حالت بروزرسانی فعال شد' : 'حالت بروزرسانی غیرفعال شد');
         await tgEditMessage(env, chat_id, mid, 'پنل مدیریت:', adminMenuKb(settings));
         return;
       }
@@ -501,18 +756,27 @@ async function onCallback(cb, env) {
 
 async function sendWelcome(chat_id, uid, env, msg) {
   try {
-    const isAdmin = isAdminUser(env, uid);
-    const baseKb = mainMenuKb();
-    if (isAdmin) {
-      // اضافه کردن دکمه پنل ادمین
-      baseKb.reply_markup.inline_keyboard.unshift([{ text: '🛠 پنل ادمین', callback_data: 'admin' }]);
-    }
+    // Referral handling
     const ref = extractReferrerFromStartParam(msg);
-    if (ref) {
-      await tgSendMessage(env, chat_id, `به ${CONFIG.BOT_NAME} خوش آمدید!\nارجاع شما: <code>${ref}</code>`, baseKb);
-    } else {
-      await tgSendMessage(env, chat_id, `به ${CONFIG.BOT_NAME} خوش آمدید!`, baseKb);
+    if (ref && ref !== uid) {
+      try {
+        const ru = await getUser(env, String(ref));
+        if (ru) {
+          ru.ref_count = Number(ru.ref_count || 0) + 1;
+          await setUser(env, String(ref), ru);
+        }
+      } catch {}
     }
+    // Force join if needed
+    const joined = await ensureJoinedChannels(env, uid, chat_id);
+    if (!joined) return;
+    // Update mode check (non-admins)
+    const settings = await getSettings(env);
+    if (settings.update_mode === true && !isAdminUser(env, uid)) {
+      await tgSendMessage(env, chat_id, 'ربات در حال بروزرسانی است. لطفاً بعداً مراجعه کنید.');
+      return;
+    }
+    await tgSendMessage(env, chat_id, `به ${CONFIG.BOT_NAME} خوش آمدید!`, mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
 }
 
@@ -736,6 +1000,8 @@ function renderStatusPage(settings, stats, envSummary = {}, kvSnapshot = {}) {
         <div>ADMIN_ID set: <b>${envSummary.adminIdSet ? 'Yes' : 'No'}</b></div>
         <div>ADMIN_IDS set: <b>${envSummary.adminIdsSet ? 'Yes' : 'No'}</b></div>
         <div>BOT_KV bound: <b>${envSummary.kvBound ? 'Yes' : 'No'}</b></div>
+        <div>BOT_USERNAME set: <b>${envSummary.botUsernameSet ? 'Yes' : 'No'}</b></div>
+        <div>JOIN_CHANNELS set: <b>${envSummary.joinChannelsSet ? 'Yes' : 'No'}</b></div>
       </div>
       <div class="stat">
         <div style="margin-bottom:6px; font-weight:600;">KV (settings)</div>
