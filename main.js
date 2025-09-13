@@ -196,8 +196,8 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '2.1';
-  } catch { return '2.1'; }
+    return s?.bot_version || '2.0';
+  } catch { return '2.0'; }
 }
 
 // ------------------ Build main menu header text ------------------ //
@@ -1413,7 +1413,10 @@ async function onCallback(cb, env) {
         meta.paid_users = paidUsers;
         // اطلاع به کاربر از کسر سکه و موجودی جدید
         const newBal = before - price;
-        try { await tgSendMessage(env, chat_id, `✅ ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} کسر شد.\nموجودی فعلی: <b>${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}</b>`); } catch {}
+        try {
+          // اعلان (alert) 3 ثانیه‌ای روی دکمه تایید
+          await tgAnswerCallbackQuery(env, cb.id, `✅ ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} کسر شد\nموجودی جدید: ${fmtNum(newBal)} ${CONFIG.DEFAULT_CURRENCY}`, { show_alert: true });
+        } catch {}
       }
       if (!already) {
         users.push(String(uid));
