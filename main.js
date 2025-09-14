@@ -2345,8 +2345,10 @@ async function sendWelcome(chat_id, uid, env, msg) {
     if (hasRef) {
       try {
         const u = await getUser(env, uid);
-        if (u && !u.referrer_id) {
-          u.referrer_id = String(ref);
+        if (u) {
+          if (!u.referrer_id) u.referrer_id = String(ref);
+          // mark referral pending until first successful join_check credit
+          u.referral_pending = true;
           await setUser(env, uid, u);
         }
       } catch {}
@@ -2364,6 +2366,7 @@ async function sendWelcome(chat_id, uid, env, msg) {
       const ok = await autoCreditReferralIfNeeded(env, String(ref), String(uid));
       if (ok) {
         try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید ثبت شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
+        try { const u = await getUser(env, uid); if (u) { u.referral_pending = false; await setUser(env, uid, u); } } catch {}
       }
     }
     // اگر /start <token> بود، ابتدا جریان دریافت با تایید کسر سکه را اجرا کن
