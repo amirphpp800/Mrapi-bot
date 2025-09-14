@@ -739,11 +739,13 @@ function dnsMenuKb() {
 function ovpnProtocolKb(prefix = '') {
   // prefix: '' for user flow, 'adm_' for admin flow
   const pre = prefix ? prefix : '';
-  return kb([
+  const rows = [
     [ { text: 'TCP', callback_data: `${pre}ovpn_proto:TCP` }, { text: 'UDP', callback_data: `${pre}ovpn_proto:UDP` } ],
     [ { text: '🎮 گیمینگ', callback_data: 'ps_gaming' } ],
     [ { text: '🔙 بازگشت', callback_data: prefix ? 'adm_service' : 'private_server' } ],
-  ]);
+  ];
+  if (prefix) rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+  return kb(rows);
 }
 
 function ovpnLocationsKb(proto, prefix = '', opts = {}) {
@@ -791,6 +793,8 @@ function adminMenuKb(settings) {
     [ { text: '📘 راهنما', callback_data: 'help' }, { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
     // Row: Block/Unblock User with emojis (Unblock on left, Block on right)
     [ { text: 'انبلاک 📛', callback_data: 'adm_unblock' }, { text: 'بلاک ⛔️', callback_data: 'adm_block' } ],
+    // Always show a button to go back to the bot main menu
+    [ { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' } ],
   ]);
 }
 
@@ -2151,6 +2155,7 @@ async function onCallback(cb, env) {
           [{ text: `➕ افزودن آدرس DNS`, callback_data: 'adm_dns_add' }],
           [{ text: `موجودی DNS — IPv4: ${fmtNum(v4)} | IPv6: ${fmtNum(v6)}`, callback_data: 'noop' }],
           [{ text: ' بازگشت', callback_data: 'admin' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
         const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nتعداد دکمه‌های غیرفعال: ${disabledCount}`;
         const kbSrv = kb(btns);
@@ -2162,6 +2167,7 @@ async function onCallback(cb, env) {
         const rows = [
           [ { text: 'IPv4', callback_data: 'adm_dns_add_v4' }, { text: 'IPv6', callback_data: 'adm_dns_add_v6' } ],
           [ { text: '🔙 بازگشت', callback_data: 'adm_service' } ],
+          [ { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' } ],
         ];
         await tgEditMessage(env, chat_id, mid, '➕ افزودن آدرس DNS\nنوع را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
