@@ -157,11 +157,15 @@ function buildPurchaseCaption(p) {
   if (p.coins != null) lines.push(`🪙 پلن: <b>${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY}</b>`);
   if (p.amount_label) lines.push(`💰 مبلغ: <b>${p.amount_label}</b>`);
   lines.push(`🆔 شناسه: <code>${p.id}</code>`);
-  // وضعیت سفارش
-  if (p.status && p.status !== 'pending') {
-    const st = p.status === 'approved' ? '✅ تایید شد' : '❌ رد شد';
-    lines.push(st);
-    if (p.reason && p.status === 'rejected') lines.push(`دلیل: ${p.reason}`);
+  // وضعیت سفارش — همیشه نمایش داده شود
+  const status = String(p.status || 'pending');
+  if (status === 'approved') {
+    lines.push('✅ تایید شد');
+  } else if (status === 'rejected') {
+    lines.push('❌ رد شد');
+    if (p.reason) lines.push(`دلیل: ${p.reason}`);
+  } else {
+    lines.push('⏳ در انتظار بررسی');
   }
   return lines.join('\n');
 }
@@ -1524,14 +1528,38 @@ async function onCallback(cb, env) {
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
-      // price check and charge (load from settings with fallback)
+      // load price from settings with fallback and ask for confirmation
       let s = {};
       try { s = await getSettings(env); } catch {}
       const price = Number((s && s.ovpn_price_coins != null) ? s.ovpn_price_coins : (CONFIG.OVPN_PRICE_COINS || 5));
+      await setUserState(env, uid, { step: 'ovpn_confirm', proto, loc, price });
+      const kbBuy = kb([
+        [{ text: `✅ تایید (کسر ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY})`, callback_data: 'ovpn_confirm' }],
+        [{ text: '❌ انصراف', callback_data: 'ovpn_cancel' }]
+      ]);
+      await tgSendMessage(env, chat_id, `دریافت کانفیگ ${loc} (${proto})\nهزینه: <b>${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY}</b>\nتایید می‌کنید؟`, kbBuy);
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data === 'ovpn_cancel') {
+      await clearUserState(env, uid);
+      await tgAnswerCallbackQuery(env, cb.id, 'لغو شد');
+      await tgSendMessage(env, chat_id, 'عملیات لغو شد.');
+      return;
+    }
+    if (data === 'ovpn_confirm') {
+      const st = await getUserState(env, uid);
+      const proto = (st && st.proto) ? String(st.proto).toUpperCase() : '';
+      const loc = st && st.loc ? String(st.loc) : '';
+      const price = Number(st && st.price != null ? st.price : (CONFIG.OVPN_PRICE_COINS || 5));
+      if (!['TCP','UDP'].includes(proto) || !loc) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+      const key = CONFIG.OVPN_PREFIX + `${proto}:${loc}`;
+      const meta = await kvGet(env, key);
+      if (!meta || !meta.file_id) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
       const u = await getUser(env, uid);
       if (!u || Number(u.balance || 0) < price) {
-        await tgSendMessage(env, chat_id, `برای دریافت کانفیگ نیاز به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} دارید. موجودی شما کافی نیست.`);
         await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی');
+        await tgSendMessage(env, chat_id, `برای دریافت کانفیگ نیاز به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} دارید. موجودی شما کافی نیست.`);
         return;
       }
       const ok = await subtractBalance(env, uid, price);
@@ -1543,7 +1571,8 @@ async function onCallback(cb, env) {
       await incStat(env, 'ovpn_revenue_coins', price);
       await bumpStat(env, `ovpn_${proto}`);
       await bumpStat(env, `ovpn_loc_${loc}`);
-      await tgAnswerCallbackQuery(env, cb.id);
+      await clearUserState(env, uid);
+      await tgAnswerCallbackQuery(env, cb.id, 'انجام شد');
       return;
     }
     if (data === 'ps_wireguard') {
@@ -1670,6 +1699,8 @@ async function onCallback(cb, env) {
       const coins = plan ? plan.coins : undefined;
       const amount_label = plan ? plan.price_label : undefined;
       await setUserState(env, uid, { step: 'buy_wait_receipt', plan_id: planId, coins, amount_label });
+      // Remove inline keyboard so the button cannot be pressed twice
+      try { await tgEditReplyMarkup(env, chat_id, mid, { inline_keyboard: [] }); } catch {}
       await tgSendMessage(env, chat_id, 'لطفاً رسید پرداخت را به صورت عکس یا فایل ارسال کنید.');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
