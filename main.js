@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.0',
+  BOT_VERSION: '4.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -653,7 +653,7 @@ function getAdminChatIds(env) {
 function mainMenuKb(env, uid) {
   const rows = [
     [ { text: '👥 معرفی دوستان', callback_data: 'referrals' }, { text: '👤 حساب کاربری', callback_data: 'account' } ],
-    [ { text: '🖥 دریافت سرور اختصاصی', callback_data: 'private_server' } ],
+    [ { text: '🛡 دریافت سرور اختصاصی', callback_data: 'private_server' } ],
     [ { text: '🎁 کد هدیه', callback_data: 'giftcode' }, { text: '🔑 دریافت با توکن', callback_data: 'redeem_token' } ],
     [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
   ];
@@ -688,13 +688,24 @@ function ovpnProtocolKb(prefix = '') {
   ]);
 }
 
-function ovpnLocationsKb(proto, prefix = '') {
+function ovpnLocationsKb(proto, prefix = '', opts = {}) {
   const pre = prefix ? prefix : '';
   const rows = [];
-  const list = CONFIG.OVPN_LOCATIONS || [];
-  for (const loc of list) {
-    const flag = (CONFIG.OVPN_FLAGS && CONFIG.OVPN_FLAGS[loc]) ? CONFIG.OVPN_FLAGS[loc] : '🌐';
-    rows.push([{ text: `${flag} ${loc}`, callback_data: `${pre}ovpn_loc:${proto}:${loc}` }]);
+  const list = (opts && Array.isArray(opts.locations)) ? opts.locations : (CONFIG.OVPN_LOCATIONS || []);
+  const flags = (opts && opts.flags) ? opts.flags : (CONFIG.OVPN_FLAGS || {});
+  // Render locations two per row
+  for (let i = 0; i < list.length; i += 2) {
+    const loc1 = list[i];
+    const loc2 = list[i + 1];
+    const flag1 = (flags && flags[loc1]) ? flags[loc1] : '🌐';
+    const row = [
+      { text: `${flag1} ${loc1}`, callback_data: `${pre}ovpn_loc:${proto}:${loc1}` },
+    ];
+    if (loc2) {
+      const flag2 = (flags && flags[loc2]) ? flags[loc2] : '🌐';
+      row.push({ text: `${flag2} ${loc2}`, callback_data: `${pre}ovpn_loc:${proto}:${loc2}` });
+    }
+    rows.push(row);
   }
   rows.push([{ text: '🔙 بازگشت', callback_data: prefix ? 'adm_service' : 'ps_openvpn' }]);
   return kb(rows);
@@ -1434,7 +1445,7 @@ async function onCallback(cb, env) {
     }
 
     if (data === 'private_server') {
-      const hdr = '🖥 دریافت سرور اختصاصی\nیکی از گزینه‌های زیر را انتخاب کنید:';
+      const hdr = '🛡 دریافت سرور اختصاصی\nیکی از گزینه‌های زیر را انتخاب کنید:';
       await tgSendMessage(env, chat_id, hdr, privateServerMenuKb());
       await tgAnswerCallbackQuery(env, cb.id);
       return;
@@ -1492,7 +1503,12 @@ async function onCallback(cb, env) {
       const proto = (data.split(':')[1] || '').toUpperCase();
       if (!['TCP','UDP'].includes(proto)) { await tgAnswerCallbackQuery(env, cb.id, 'پروتکل نامعتبر'); return; }
       await setUserState(env, uid, { step: 'ovpn_pick_loc', proto });
-      await tgSendMessage(env, chat_id, `پروتکل انتخاب‌شده: ${proto}\nیکی از لوکیشن‌ها را انتخاب کنید:`, ovpnLocationsKb(proto));
+      // Load locations/flags from settings (KV) with fallbacks
+      let s = {};
+      try { s = await getSettings(env); } catch {}
+      const locations = Array.isArray(s?.ovpn_locations) && s.ovpn_locations.length ? s.ovpn_locations : (CONFIG.OVPN_LOCATIONS || []);
+      const flags = s?.ovpn_flags && typeof s.ovpn_flags === 'object' ? s.ovpn_flags : (CONFIG.OVPN_FLAGS || {});
+      await tgSendMessage(env, chat_id, `پروتکل انتخاب‌شده: ${proto}\nیکی از لوکیشن‌ها را انتخاب کنید:`, ovpnLocationsKb(proto, '', { locations, flags }));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -1508,8 +1524,10 @@ async function onCallback(cb, env) {
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
-      // price check and charge
-      const price = Number(CONFIG.OVPN_PRICE_COINS || 5);
+      // price check and charge (load from settings with fallback)
+      let s = {};
+      try { s = await getSettings(env); } catch {}
+      const price = Number((s && s.ovpn_price_coins != null) ? s.ovpn_price_coins : (CONFIG.OVPN_PRICE_COINS || 5));
       const u = await getUser(env, uid);
       if (!u || Number(u.balance || 0) < price) {
         await tgSendMessage(env, chat_id, `برای دریافت کانفیگ نیاز به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} دارید. موجودی شما کافی نیست.`);
@@ -1622,7 +1640,10 @@ async function onCallback(cb, env) {
       const planId = data.split(':')[1];
       const plan = plans.find(p => p.id === planId);
       if (!plan) { await tgAnswerCallbackQuery(env, cb.id, 'پلن یافت نشد'); return; }
-      const card = CONFIG.CARD_INFO;
+      // Card info from settings (KV) with fallback to CONFIG
+      let s = {};
+      try { s = await getSettings(env); } catch {}
+      const card = (s && s.card_info && typeof s.card_info === 'object') ? s.card_info : CONFIG.CARD_INFO;
       const txt = [
         'اطلاعات پرداخت',
         `پلن انتخابی: ${plan.coins} ${CONFIG.DEFAULT_CURRENCY}`,
@@ -2484,6 +2505,13 @@ async function getSettings(env) {
   // granular disabled buttons list
   if (!Array.isArray(s.disabled_buttons)) s.disabled_buttons = [];
   if (!s.disabled_message) s.disabled_message = '🔧 این دکمه موقتاً غیرفعال است.';
+  // Hydrate dynamic defaults so settings persist across deploys
+  let changed = false;
+  if (typeof s.ovpn_price_coins === 'undefined') { s.ovpn_price_coins = CONFIG.OVPN_PRICE_COINS; changed = true; }
+  if (!Array.isArray(s.ovpn_locations) || !s.ovpn_locations.length) { s.ovpn_locations = CONFIG.OVPN_LOCATIONS; changed = true; }
+  if (!s.ovpn_flags || typeof s.ovpn_flags !== 'object') { s.ovpn_flags = CONFIG.OVPN_FLAGS; changed = true; }
+  if (!s.card_info || typeof s.card_info !== 'object') { s.card_info = CONFIG.CARD_INFO; changed = true; }
+  if (changed) { try { await setSettings(env, s); } catch {} }
   return s;
 }
 async function setSettings(env, s) { return kvSet(env, CONFIG.SERVICE_TOGGLE_KEY, s); }
