@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '1.0',
+  BOT_VERSION: '2.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -66,6 +66,10 @@ const CONFIG = {
     'ایتالیا': '🇮🇹',
     'آمریکا': '🇺🇸',
   },
+  // DNS settings
+  DNS_PRICE_COINS: 2,
+  DNS_PREFIX_V4: 'dns:v4:',
+  DNS_PREFIX_V6: 'dns:v6:',
 };
 
 // صفحات فانکشنز env: { BOT_KV }
@@ -605,6 +609,23 @@ function newToken(size = 26) {
 }
 function htmlEscape(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 
+// IP validators
+function isIPv4(ip) {
+  const m = String(ip || '').trim().match(/^(25[0-5]|2[0-4]\d|[01]?\d?\d)(\.(25[0-5]|2[0-4]\d|[01]?\d?\d)){3}$/);
+  return !!m;
+}
+function isIPv6(ip) {
+  // Simple IPv6 validation (covers compressed forms)
+  const s = String(ip || '').trim();
+  // Reject IPv4-like strings
+  if (s.includes('.') && !s.includes(':')) return false;
+  // Basic check: contains ':' and at least two hextets
+  if (!s.includes(':')) return false;
+  // Accept if it matches typical IPv6 patterns
+  const re = /^([0-9A-Fa-f]{1,4}(:|::)){1,7}[0-9A-Fa-f]{0,4}$/;
+  return re.test(s) || s === '::';
+}
+
 // =========================================================
 // 5) Inline UI Helpers
 // =========================================================
@@ -681,6 +702,13 @@ function privateServerMenuKb() {
     [ { text: 'وایرگارد', callback_data: 'ps_wireguard' } ],
     [ { text: 'دی‌ان‌اس', callback_data: 'ps_dns' } ],
     [ { text: '🔙 بازگشت', callback_data: 'back_main' } ],
+  ]);
+}
+
+function dnsMenuKb() {
+  return kb([
+    [ { text: 'نسل 4 (IPv4)', callback_data: 'ps_dns_v4' }, { text: 'نسل 6 (IPv6)', callback_data: 'ps_dns_v6' } ],
+    [ { text: '🔙 بازگشت', callback_data: 'private_server' } ],
   ]);
 }
 
@@ -1633,8 +1661,43 @@ async function onCallback(cb, env) {
       return;
     }
     if (data === 'ps_dns') {
-      await tgSendMessage(env, chat_id, 'درحال توسعه');
+      const v4 = await countAvailableDns(env, 'v4');
+      const v6 = await countAvailableDns(env, 'v6');
+      const txt = [
+        '🎛 سرویس دی‌ان‌اس خصوصی',
+        `قیمت هر دی‌ان‌اس: ${fmtNum(CONFIG.DNS_PRICE_COINS)} ${CONFIG.DEFAULT_CURRENCY}`,
+        `موجودی: IPv4 = ${fmtNum(v4)} | IPv6 = ${fmtNum(v6)}`,
+        '',
+        'نوع را انتخاب کنید:',
+      ].join('\n');
+      await tgEditMessage(env, chat_id, mid, txt, dnsMenuKb());
       await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data === 'ps_dns_v4' || data === 'ps_dns_v6') {
+      const version = data.endsWith('_v4') ? 'v4' : 'v6';
+      const price = Number(CONFIG.DNS_PRICE_COINS || 2);
+      const u = await getUser(env, uid);
+      const bal = Number(u?.balance || 0);
+      const avail = await countAvailableDns(env, version);
+      if (avail <= 0) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await tgSendMessage(env, chat_id, '❌ در حال حاضر موجود نیست.'); return; }
+      if (bal < price) { await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی'); await tgSendMessage(env, chat_id, `برای دریافت دی‌ان‌اس به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`); return; }
+      const alloc = await allocateDnsForUser(env, uid, version);
+      if (!alloc) { await tgAnswerCallbackQuery(env, cb.id, 'خطا/ناموجود'); await tgSendMessage(env, chat_id, '❌ خطا در اختصاص دی‌ان‌اس.'); return; }
+      const ok = await subtractBalance(env, uid, price);
+      if (!ok) { // rollback allocation if possible
+        try { await unassignDns(env, alloc.version, alloc.ip); } catch {}
+        await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی');
+        await tgSendMessage(env, chat_id, `برای دریافت دی‌ان‌اس به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`);
+        return;
+      }
+      const flag = alloc.flag || '🌐';
+      const country = alloc.country || '';
+      const ip = alloc.ip;
+      const caption = `${ip}\nدی ان اس ک گرفته`;
+      await tgAnswerCallbackQuery(env, cb.id, 'اختصاص یافت');
+      await tgSendMessage(env, chat_id, `${flag} ${country}`.trim());
+      await tgSendMessage(env, chat_id, caption, kb([[{ text: '🔙 بازگشت', callback_data: 'ps_dns' }]]));
       return;
     }
 
@@ -1945,14 +2008,34 @@ async function onCallback(cb, env) {
         const s = await getSettings(env);
         const enabled = s?.service_enabled !== false;
         const disabledCount = Array.isArray(s.disabled_buttons) ? s.disabled_buttons.length : 0;
+        const v4 = await countAvailableDns(env, 'v4');
+        const v6 = await countAvailableDns(env, 'v6');
         const btns = [
           [{ text: ` مدیریت دکمه‌های غیرفعال (${disabledCount})`, callback_data: 'adm_buttons' }],
           [{ text: '📥 آپلود اوپن وی پی ان', callback_data: 'adm_ovpn_upload' }],
+          [{ text: `➕ افزودن آدرس DNS`, callback_data: 'adm_dns_add' }],
+          [{ text: `موجودی DNS — IPv4: ${fmtNum(v4)} | IPv6: ${fmtNum(v6)}`, callback_data: 'noop' }],
           [{ text: ' بازگشت', callback_data: 'admin' }],
         ];
         const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nتعداد دکمه‌های غیرفعال: ${disabledCount}`;
         const kbSrv = kb(btns);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_add') {
+        const rows = [
+          [ { text: 'IPv4', callback_data: 'adm_dns_add_v4' }, { text: 'IPv6', callback_data: 'adm_dns_add_v6' } ],
+          [ { text: '🔙 بازگشت', callback_data: 'adm_service' } ],
+        ];
+        await tgEditMessage(env, chat_id, mid, '➕ افزودن آدرس DNS\nنوع را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_add_v4' || data === 'adm_dns_add_v6') {
+        const version = data.endsWith('_v4') ? 'v4' : 'v6';
+        await setUserState(env, uid, { step: 'adm_dns_add_addresses', version });
+        await tgSendMessage(env, chat_id, 'لطفاً آدرس‌ها را به صورت خط‌به‌خط ارسال کنید (مثال: 1.1.1.1 در هر خط). پس از ارسال، کشور پرسیده می‌شود.');
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -2613,6 +2696,79 @@ async function buildUserReport(env, targetUid) {
     console.error('buildUserReport error', e);
     return 'خطا در تولید گزارش کاربر';
   }
+}
+
+// ===== DNS Storage Helpers =====
+function dnsPrefix(version) {
+  return version === 'v6' ? CONFIG.DNS_PREFIX_V6 : CONFIG.DNS_PREFIX_V4;
+}
+
+async function putDnsAddresses(env, version, ips, country, flag, added_by) {
+  let added = 0;
+  const ver = (version === 'v6') ? 'v6' : 'v4';
+  for (const ip of ips) {
+    if (ver === 'v4' && !isIPv4(ip)) continue;
+    if (ver === 'v6' && !isIPv6(ip)) continue;
+    const key = dnsPrefix(ver) + ip;
+    const exists = await kvGet(env, key);
+    if (exists) continue; // skip duplicates
+    const obj = {
+      ip,
+      version: ver,
+      country: country || '',
+      flag: flag || '🌐',
+      added_by: String(added_by || ''),
+      assigned_to: '',
+      assigned_at: 0,
+      ts: nowTs(),
+    };
+    const ok = await kvSet(env, key, obj);
+    if (ok) added++;
+  }
+  return added;
+}
+
+async function countAvailableDns(env, version) {
+  try {
+    const prefix = dnsPrefix(version);
+    const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+    let cnt = 0;
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (v && !v.assigned_to) cnt++;
+    }
+    return cnt;
+  } catch (e) { console.error('countAvailableDns error', e); return 0; }
+}
+
+async function allocateDnsForUser(env, uid, version) {
+  try {
+    const prefix = dnsPrefix(version);
+    const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+    for (const k of list.keys) {
+      const key = k.name;
+      const v = await kvGet(env, key);
+      if (!v || v.assigned_to) continue;
+      v.assigned_to = String(uid);
+      v.assigned_at = nowTs();
+      const ok = await kvSet(env, key, v);
+      if (ok) {
+        return { ip: v.ip, version: v.version, country: v.country, flag: v.flag };
+      }
+    }
+    return null;
+  } catch (e) { console.error('allocateDnsForUser error', e); return null; }
+}
+
+async function unassignDns(env, version, ip) {
+  try {
+    const key = dnsPrefix(version) + ip;
+    const v = await kvGet(env, key);
+    if (!v) return false;
+    v.assigned_to = '';
+    v.assigned_at = 0;
+    return await kvSet(env, key, v);
+  } catch (e) { console.error('unassignDns error', e); return false; }
 }
 
 async function getSettings(env) {
