@@ -717,6 +717,7 @@ function ovpnProtocolKb(prefix = '') {
   const pre = prefix ? prefix : '';
   return kb([
     [ { text: 'TCP', callback_data: `${pre}ovpn_proto:TCP` }, { text: 'UDP', callback_data: `${pre}ovpn_proto:UDP` } ],
+    [ { text: '🎮 گیمینگ', callback_data: 'ps_gaming' } ],
     [ { text: '🔙 بازگشت', callback_data: prefix ? 'adm_service' : 'private_server' } ],
   ]);
 }
@@ -1710,6 +1711,11 @@ async function onCallback(cb, env) {
     }
     if (data === 'ps_wireguard') {
       await tgSendMessage(env, chat_id, 'درحال توسعه');
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data === 'ps_gaming') {
+      await tgSendMessage(env, chat_id, '🎮 سرویس گیمینگ درحال توسعه است');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
