@@ -1185,6 +1185,44 @@ async function onMessage(msg, env) {
       }
       // Admin flows
       if (isAdminUser(env, uid)) {
+        // Admin: DNS add flow — addresses list
+        if (state?.step === 'adm_dns_add_addresses' && state?.version) {
+          const version = state.version === 'v6' ? 'v6' : 'v4';
+          // Split lines, trim, and keep valid format; validation happens later in putDnsAddresses
+          const ips = String(text || '')
+            .split(/\r?\n/)
+            .map(s => s.trim())
+            .filter(Boolean);
+          if (!ips.length) { await tgSendMessage(env, chat_id, '❌ هیچ آدرسی یافت نشد. دوباره ارسال کنید یا /update برای لغو.'); return; }
+          await setUserState(env, uid, { step: 'adm_dns_add_country', version, ips });
+          await tgSendMessage(env, chat_id, '🌍 کشور مربوط به این آدرس‌ها را ارسال کنید (مثال: آمریکا):');
+          return;
+        }
+        // Admin: DNS add flow — country
+        if (state?.step === 'adm_dns_add_country' && Array.isArray(state?.ips) && state?.version) {
+          const version = state.version === 'v6' ? 'v6' : 'v4';
+          const country = String(text || '').trim();
+          if (!country) { await tgSendMessage(env, chat_id, '❌ کشور نامعتبر است. لطفاً مجدداً ارسال کنید:'); return; }
+          await setUserState(env, uid, { step: 'adm_dns_add_flag', version, ips: state.ips, country });
+          await tgSendMessage(env, chat_id, 'پرچم/ایموجی لوکیشن را ارسال کنید (مثال: 🇺🇸). برای پیشفرض "🌐"، همان را ارسال کنید.');
+          return;
+        }
+        // Admin: DNS add flow — flag and save
+        if (state?.step === 'adm_dns_add_flag' && Array.isArray(state?.ips) && state?.version && state?.country) {
+          const version = state.version === 'v6' ? 'v6' : 'v4';
+          const country = String(state.country || '').trim();
+          const flag = String((text || '🌐').trim() || '🌐');
+          const countBefore = await countAvailableDns(env, version);
+          const added = await putDnsAddresses(env, version, state.ips, country, flag, uid);
+          const countAfter = await countAvailableDns(env, version);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `✅ افزودن انجام شد.
+نسخه: ${version.toUpperCase()}
+لوکیشن: ${flag} ${country}
+تعداد افزوده‌شده: ${fmtNum(added)}
+موجودی قبل: ${fmtNum(countBefore)} | موجودی فعلی: ${fmtNum(countAfter)}`);
+          return;
+        }
         // Admin: Block user by numeric ID
         if (state?.step === 'adm_block_uid') {
           const target = (text || '').trim();
@@ -1676,28 +1714,81 @@ async function onCallback(cb, env) {
     }
     if (data === 'ps_dns_v4' || data === 'ps_dns_v6') {
       const version = data.endsWith('_v4') ? 'v4' : 'v6';
+      // Build a location keyboard grouped by country with availability counts
+      const map = await groupDnsAvailabilityByCountry(env, version);
+      const countries = Object.keys(map);
+      if (!countries.length) {
+        await tgAnswerCallbackQuery(env, cb.id, 'ناموجود');
+        await tgSendMessage(env, chat_id, '❌ در حال حاضر موجود نیست.');
+        return;
+      }
+      const rows = [];
+      for (let i = 0; i < countries.length; i += 2) {
+        const c1 = countries[i];
+        const c2 = countries[i + 1];
+        const f1 = (map[c1]?.flag) || '🌐';
+        const n1 = map[c1]?.count || 0;
+        const row = [ { text: `${f1} ${c1} — ${fmtNum(n1)}`, callback_data: `ps_dns_loc:${version}:${c1}` } ];
+        if (c2) {
+          const f2 = (map[c2]?.flag) || '🌐';
+          const n2 = map[c2]?.count || 0;
+          row.push({ text: `${f2} ${c2} — ${fmtNum(n2)}`, callback_data: `ps_dns_loc:${version}:${c2}` });
+        }
+        rows.push(row);
+      }
+      rows.push([{ text: '🔙 بازگشت', callback_data: 'ps_dns' }]);
+      await tgEditMessage(env, chat_id, mid, `🌍 نسخه ${version.toUpperCase()} — یک لوکیشن را انتخاب کنید:`, kb(rows));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data.startsWith('ps_dns_loc:')) {
+      const parts = data.split(':');
+      const version = parts[1] === 'v6' ? 'v6' : 'v4';
+      const country = parts.slice(2).join(':');
       const price = Number(CONFIG.DNS_PRICE_COINS || 2);
+      const count = await countAvailableDnsByCountry(env, version, country);
+      if (count <= 0) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); return; }
+      await setUserState(env, uid, { step: 'ps_dns_confirm', version, country, price });
+      await tgEditMessage(env, chat_id, mid, `دریافت DNS ${version.toUpperCase()} — ${country}\nهزینه: ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY}\nموجودی ${country}: ${fmtNum(count)}\nتایید می‌کنید؟`, kb([
+        [{ text: `✅ تایید`, callback_data: 'ps_dns_confirm' }],
+        [{ text: '❌ انصراف', callback_data: 'ps_dns_cancel' }]
+      ]));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data === 'ps_dns_cancel') {
+      await clearUserState(env, uid);
+      await tgAnswerCallbackQuery(env, cb.id, 'لغو شد');
+      await tgSendMessage(env, chat_id, 'عملیات لغو شد.', dnsMenuKb());
+      return;
+    }
+    if (data === 'ps_dns_confirm') {
+      const st = await getUserState(env, uid);
+      const version = st?.version === 'v6' ? 'v6' : 'v4';
+      const country = st?.country || '';
+      const price = Number(st?.price || CONFIG.DNS_PRICE_COINS || 2);
+      if (!country) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+      const avail = await countAvailableDnsByCountry(env, version, country);
+      if (avail <= 0) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await tgSendMessage(env, chat_id, '❌ در حال حاضر موجود نیست.'); return; }
       const u = await getUser(env, uid);
       const bal = Number(u?.balance || 0);
-      const avail = await countAvailableDns(env, version);
-      if (avail <= 0) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await tgSendMessage(env, chat_id, '❌ در حال حاضر موجود نیست.'); return; }
       if (bal < price) { await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی'); await tgSendMessage(env, chat_id, `برای دریافت دی‌ان‌اس به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`); return; }
-      const alloc = await allocateDnsForUser(env, uid, version);
+      const alloc = await allocateDnsForUserByCountry(env, uid, version, country);
       if (!alloc) { await tgAnswerCallbackQuery(env, cb.id, 'خطا/ناموجود'); await tgSendMessage(env, chat_id, '❌ خطا در اختصاص دی‌ان‌اس.'); return; }
       const ok = await subtractBalance(env, uid, price);
-      if (!ok) { // rollback allocation if possible
+      if (!ok) {
         try { await unassignDns(env, alloc.version, alloc.ip); } catch {}
         await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی');
         await tgSendMessage(env, chat_id, `برای دریافت دی‌ان‌اس به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`);
         return;
       }
       const flag = alloc.flag || '🌐';
-      const country = alloc.country || '';
       const ip = alloc.ip;
-      const caption = `${ip}\nدی ان اس ک گرفته`;
+      const caption = `${ip}\nDNS اختصاص داده شد`;
       await tgAnswerCallbackQuery(env, cb.id, 'اختصاص یافت');
       await tgSendMessage(env, chat_id, `${flag} ${country}`.trim());
       await tgSendMessage(env, chat_id, caption, kb([[{ text: '🔙 بازگشت', callback_data: 'ps_dns' }]]));
+      await clearUserState(env, uid);
       return;
     }
 
@@ -2769,6 +2860,57 @@ async function unassignDns(env, version, ip) {
     v.assigned_at = 0;
     return await kvSet(env, key, v);
   } catch (e) { console.error('unassignDns error', e); return false; }
+}
+
+// Group availability by country, preserving a representative flag
+async function groupDnsAvailabilityByCountry(env, version) {
+  try {
+    const prefix = dnsPrefix(version);
+    const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+    const map = {};
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (!v || v.assigned_to) continue;
+      const c = v.country || 'نامشخص';
+      if (!map[c]) map[c] = { count: 0, flag: v.flag || '🌐' };
+      map[c].count += 1;
+      if (!map[c].flag && v.flag) map[c].flag = v.flag;
+    }
+    return map;
+  } catch (e) { console.error('groupDnsAvailabilityByCountry error', e); return {}; }
+}
+
+async function countAvailableDnsByCountry(env, version, country) {
+  try {
+    const prefix = dnsPrefix(version);
+    const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+    let cnt = 0;
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (v && !v.assigned_to && String(v.country || '') === String(country || '')) cnt++;
+    }
+    return cnt;
+  } catch (e) { console.error('countAvailableDnsByCountry error', e); return 0; }
+}
+
+async function allocateDnsForUserByCountry(env, uid, version, country) {
+  try {
+    const prefix = dnsPrefix(version);
+    const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+    for (const k of list.keys) {
+      const key = k.name;
+      const v = await kvGet(env, key);
+      if (!v || v.assigned_to) continue;
+      if (String(v.country || '') !== String(country || '')) continue;
+      v.assigned_to = String(uid);
+      v.assigned_at = nowTs();
+      const ok = await kvSet(env, key, v);
+      if (ok) {
+        return { ip: v.ip, version: v.version, country: v.country, flag: v.flag };
+      }
+    }
+    return null;
+  } catch (e) { console.error('allocateDnsForUserByCountry error', e); return null; }
 }
 
 async function getSettings(env) {
