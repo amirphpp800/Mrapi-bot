@@ -316,10 +316,10 @@ async function getTicket(env, id) { return (await kvGet(env, CONFIG.TICKET_PREFI
 async function saveTicket(env, t) { return kvSet(env, CONFIG.TICKET_PREFIX + t.id, t); }
 
 // Gift codes
-async function createGiftCode(env, amount) {
+async function createGiftCode(env, amount, max_uses = 0) {
   try {
     const code = newToken(10);
-    const obj = { code, amount: Number(amount || 0), created_at: nowTs(), used_by: null };
+    const obj = { code, amount: Number(amount || 0), max_uses: Number(max_uses || 0), created_at: nowTs(), used_by: [] };
     await kvSet(env, CONFIG.GIFT_PREFIX + code, obj);
     return obj;
   } catch (e) { console.error('createGiftCode error', e); return null; }
@@ -1090,8 +1090,20 @@ async function onMessage(msg, env) {
       // Handle stateful flows for giftcode/redeem
       const state = await getUserState(env, uid);
       if (state?.step === 'giftcode_wait') {
-        const code = text.trim();
-        await handleGiftCodeRedeem(env, uid, chat_id, code);
+        // Backward-compatible: treat like gift_redeem_wait
+        const code = String((text||'').trim());
+        const g = await kvGet(env, CONFIG.GIFT_PREFIX + code);
+        if (!g) { await tgSendMessage(env, chat_id, 'کد هدیه نامعتبر است.'); return; }
+        const usedBy = Array.isArray(g.used_by) ? g.used_by : [];
+        if (usedBy.includes(uid)) { await tgSendMessage(env, chat_id, 'شما قبلاً از این کد استفاده کرده‌اید.'); return; }
+        const max = Number(g.max_uses || 0);
+        if (max > 0 && usedBy.length >= max) { await tgSendMessage(env, chat_id, 'سقف استفاده از این کد تکمیل شده است.'); return; }
+        const ok = await creditBalance(env, uid, Number(g.amount || 0));
+        if (!ok) { await tgSendMessage(env, chat_id, 'خطا در اعمال کد.'); return; }
+        usedBy.push(uid); g.used_by = usedBy;
+        await kvSet(env, CONFIG.GIFT_PREFIX + code, g);
+        await tgSendMessage(env, chat_id, `✅ کد هدیه اعمال شد. ${fmtNum(g.amount)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد.`);
+        await clearUserState(env, uid);
         return;
       }
       if (state?.step === 'redeem_token_wait') {
@@ -1177,21 +1189,7 @@ async function onMessage(msg, env) {
           await tgSendMessage(env, chat_id, `✅ افزوده شد: ${token}\nکانال‌های فعلی: ${arr.join(', ') || '—'}\nمی‌توانید کانال بعدی را ارسال کنید یا با /update خارج شوید.`);
           return;
         }
-        if (state?.step === 'adm_gift_create_amount') {
-          const amount = Number(text.replace(/[^0-9]/g, ''));
-          if (!amount || amount <= 0) {
-            await tgSendMessage(env, chat_id, 'مبلغ نامعتبر است. یک عدد معتبر ارسال کنید.');
-            return;
-          }
-          const g = await createGiftCode(env, amount);
-          if (g) {
-            await tgSendMessage(env, chat_id, `✅ کد هدیه ایجاد شد.\nکد: <code>${g.code}</code>\nمبلغ: ${fmtNum(g.amount)} ${CONFIG.DEFAULT_CURRENCY}`);
-          } else {
-            await tgSendMessage(env, chat_id, '❌ ایجاد کد هدیه ناموفق بود.');
-          }
-          await clearUserState(env, uid);
-          return;
-        }
+        
         if (state?.step === 'adm_add_uid') {
           const target = text.trim();
           if (!/^\d+$/.test(target)) { await tgSendMessage(env, chat_id, 'آیدی نامعتبر است.'); return; }
