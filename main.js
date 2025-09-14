@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '4.0',
+  BOT_VERSION: '5.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -31,6 +31,7 @@ const CONFIG = {
   REDEEM_PREFIX: 'redeem:',
   REF_DONE_PREFIX: 'ref:done:',
   PURCHASE_PREFIX: 'purchase:',
+  BLOCK_PREFIX: 'blocked:',
   // پرداخت و پلن‌ها (می‌توانید از طریق تنظیمات نیز override کنید)
   PLANS: [
     { id: 'p1', coins: 5, price_label: '۱۵٬۰۰۰ تومان' },
@@ -735,6 +736,8 @@ function adminMenuKb(settings) {
     [ { text: '🧰 بکاپ دیتابیس', callback_data: 'adm_backup' } ],
     // Row 7: Help + Broadcast in same row
     [ { text: '📘 راهنما', callback_data: 'help' }, { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
+    // Row: Block/Unblock User
+    [ { text: 'بلاک کاربر', callback_data: 'adm_block' }, { text: 'آنبلاک کاربر', callback_data: 'adm_unblock' } ],
   ]);
 }
 
@@ -873,6 +876,18 @@ async function onMessage(msg, env) {
     const uid = String(from.id);
     await ensureUser(env, uid, from);
 
+    // Blocked user check
+    try {
+      const blocked = await isUserBlocked(env, uid);
+      if (blocked) {
+        const s = await getSettings(env);
+        const url = s?.support_url || 'https://t.me/NeoDebug';
+        const kbSupport = kb([[{ text: 'ارتباط با پشتیبانی', url }]]);
+        await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
+        return;
+      }
+    } catch {}
+
     // If update mode is on, block non-admin users globally
     try {
       const s = await getSettings(env);
@@ -934,7 +949,11 @@ async function onMessage(msg, env) {
         const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
         for (const aid of admins) {
           const res = await tgSendPhoto(env, aid, largest.file_id, { caption: buildPurchaseCaption(p), reply_markup: adminKb.reply_markup });
-          const mid = res?.result?.message_id; if (mid) p.admin_msgs.push({ chat_id: String(aid), message_id: mid });
+          const mid = res?.result?.message_id; if (mid) {
+            p.admin_msgs.push({ chat_id: String(aid), message_id: mid });
+            // Force caption to include explicit pending status (defensive update)
+            try { await tgEditMessageCaption(env, String(aid), mid, buildPurchaseCaption(p), {}); } catch {}
+          }
         }
         await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
         await clearUserState(env, uid);
@@ -960,7 +979,11 @@ async function onMessage(msg, env) {
         const adminKb = kb([[{ text: '✅ تایید و واریز', callback_data: 'buy_approve:' + purchaseId }, { text: '❌ رد', callback_data: 'buy_reject:' + purchaseId }]]);
         for (const aid of admins) {
           const res = await tgSendDocument(env, aid, msg.document.file_id, { caption: buildPurchaseCaption(p), reply_markup: adminKb.reply_markup });
-          const mid = res?.result?.message_id; if (mid) p.admin_msgs.push({ chat_id: String(aid), message_id: mid });
+          const mid = res?.result?.message_id; if (mid) {
+            p.admin_msgs.push({ chat_id: String(aid), message_id: mid });
+            // Force caption to include explicit pending status (defensive update)
+            try { await tgEditMessageCaption(env, String(aid), mid, buildPurchaseCaption(p), {}); } catch {}
+          }
         }
         await kvSet(env, CONFIG.PURCHASE_PREFIX + purchaseId, p);
         await clearUserState(env, uid);
@@ -1122,6 +1145,24 @@ async function onMessage(msg, env) {
       }
       // Admin flows
       if (isAdminUser(env, uid)) {
+        // Admin: Block user by numeric ID
+        if (state?.step === 'adm_block_uid') {
+          const target = (text || '').trim();
+          if (!/^\d+$/.test(target)) { await tgSendMessage(env, chat_id, 'آیدی نامعتبر است. فقط عدد وارد کنید.'); return; }
+          await blockUser(env, target);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `کاربر <code>${target}</code> بلاک شد.`);
+          return;
+        }
+        // Admin: Unblock user by numeric ID
+        if (state?.step === 'adm_unblock_uid') {
+          const target = (text || '').trim();
+          if (!/^\d+$/.test(target)) { await tgSendMessage(env, chat_id, 'آیدی نامعتبر است. فقط عدد وارد کنید.'); return; }
+          await unblockUser(env, target);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `کاربر <code>${target}</code> از بلاک خارج شد.`);
+          return;
+        }
         if (state?.step === 'adm_join_wait') {
           const token = normalizeChannelToken(text);
           if (!token) {
@@ -1380,6 +1421,19 @@ async function onCallback(cb, env) {
 
     // Ensure user profile exists for balance operations
     try { await ensureUser(env, uid, from); } catch {}
+
+    // Blocked user check
+    try {
+      const blocked = await isUserBlocked(env, uid);
+      if (blocked) {
+        const s = await getSettings(env);
+        const url = s?.support_url || 'https://t.me/NeoDebug';
+        const kbSupport = kb([[{ text: 'ارتباط با پشتیبانی', url }]]);
+        await tgAnswerCallbackQuery(env, cb.id, 'مسدود هستید');
+        await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
+        return;
+      }
+    } catch {}
 
     // Update mode: block non-admin users from using buttons
     try {
@@ -1877,6 +1931,18 @@ async function onCallback(cb, env) {
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
+      if (data === 'adm_block') {
+        await setUserState(env, uid, { step: 'adm_block_uid' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'آیدی عددی کاربر برای بلاک را ارسال کنید:');
+        return;
+      }
+      if (data === 'adm_unblock') {
+        await setUserState(env, uid, { step: 'adm_unblock_uid' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'آیدی عددی کاربر برای آنبلاک را ارسال کنید:');
+        return;
+      }
       if (data === 'adm_service') {
         const s = await getSettings(env);
         const enabled = s?.service_enabled !== false;
@@ -1992,7 +2058,7 @@ async function onCallback(cb, env) {
               await tgEditReplyMarkup(env, m.chat_id, m.message_id, kb([[{ text: ' تایید شد', callback_data: 'noop' }]]).reply_markup);
             } catch {}
           }
-          try { await tgSendMessage(env, String(p.user_id), `❤️ ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد. سپاس از پرداخت شما.`); } catch {}
+          try { await tgSendMessage(env, String(p.user_id), `${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} به حساب شما افزوده شد. سپاس از پرداخت شما ❤️`); } catch {}
           await tgAnswerCallbackQuery(env, cb.id, 'واریز شد');
         } else {
           await tgAnswerCallbackQuery(env, cb.id, 'خطا در واریز');
@@ -2382,6 +2448,11 @@ async function getUserState(env, uid) { return (await kvGet(env, CONFIG.USER_PRE
 async function setUserState(env, uid, state) { return kvSet(env, CONFIG.USER_PREFIX + uid + ':state', state); }
 async function clearUserState(env, uid) { return kvDel(env, CONFIG.USER_PREFIX + uid + ':state'); }
 
+// Blocklist helpers
+async function blockUser(env, targetUid) { return kvSet(env, CONFIG.BLOCK_PREFIX + String(targetUid), { blocked: true, ts: nowTs() }); }
+async function unblockUser(env, targetUid) { return kvDel(env, CONFIG.BLOCK_PREFIX + String(targetUid)); }
+async function isUserBlocked(env, targetUid) { return !!(await kvGet(env, CONFIG.BLOCK_PREFIX + String(targetUid))); }
+
 async function transferBalance(env, fromUid, toUid, amount) {
   try {
     const a = await getUser(env, fromUid);
@@ -2542,6 +2613,7 @@ async function getSettings(env) {
   if (!Array.isArray(s.ovpn_locations) || !s.ovpn_locations.length) { s.ovpn_locations = CONFIG.OVPN_LOCATIONS; changed = true; }
   if (!s.ovpn_flags || typeof s.ovpn_flags !== 'object') { s.ovpn_flags = CONFIG.OVPN_FLAGS; changed = true; }
   if (!s.card_info || typeof s.card_info !== 'object') { s.card_info = CONFIG.CARD_INFO; changed = true; }
+  if (!s.support_url) { s.support_url = 'https://t.me/NeoDebug'; changed = true; }
   if (changed) { try { await setSettings(env, s); } catch {} }
   return s;
 }
