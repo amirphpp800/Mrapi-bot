@@ -102,14 +102,14 @@ async function deliverFileToUser(env, uid, chat_id, token) {
     const already = users.includes(String(uid));
     const alreadyPaid = paidUsers.includes(String(uid));
     if (!already && maxUsers > 0 && users.length >= maxUsers) {
-      await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.');
+      await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
       return false;
     }
     // در صورت قیمت‌دار بودن، فقط اگر قبلاً پرداخت نشده کسر کن
     if (price > 0 && !isOwner && !alreadyPaid) {
       const u = await getUser(env, String(uid));
       if (!u || Number(u.balance || 0) < price) {
-        await tgSendMessage(env, chat_id, 'موجودی شما برای دریافت فایل کافی نیست.');
+        await tgSendMessage(env, chat_id, 'موجودی شما برای دریافت فایل کافی نیست.', mainMenuInlineKb());
         return false;
       }
       u.balance = Number(u.balance || 0) - price;
@@ -631,6 +631,30 @@ function isIPv6(ip) {
 // =========================================================
 function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
 
+// Common inline keyboard: single button to go back to the main menu
+function mainMenuInlineKb() {
+  return kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]);
+}
+
+// Send a standard WIP (in development) message
+async function sendWip(env, chat_id, feature = 'این بخش') {
+  try { await tgSendMessage(env, chat_id, `🔧 ${feature} درحال توسعه است.`, mainMenuInlineKb()); } catch {}
+}
+
+// Send a standard not-available message
+async function sendNotAvailable(env, chat_id, note = '❌ در حال حاضر موجود نیست.') {
+  try { await tgSendMessage(env, chat_id, note, mainMenuInlineKb()); } catch {}
+}
+
+// Get OVPN price from settings with fallback
+async function getOvpnPrice(env) {
+  try {
+    const s = await getSettings(env);
+    if (s && s.ovpn_price_coins != null) return Number(s.ovpn_price_coins);
+  } catch {}
+  return Number(CONFIG.OVPN_PRICE_COINS || 5);
+}
+
 // آیکون نوع فایل
 function kindIcon(kind) {
   const k = String(kind || 'document');
@@ -921,7 +945,7 @@ async function onMessage(msg, env) {
     try {
       const s = await getSettings(env);
       if (s?.update_mode === true && !isAdminUser(env, uid)) {
-        await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.');
+        await tgSendMessage(env, chat_id, '🛠️ ربات در حال بروزرسانی است. لطفاً بعداً تلاش کنید.', kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]));
         return;
       }
     } catch {}
@@ -1029,7 +1053,7 @@ async function onMessage(msg, env) {
       const settings = await getSettings(env);
       const enabled = settings?.service_enabled !== false;
       if (!enabled) {
-        await tgSendMessage(env, chat_id, 'سرویس موقتاً غیرفعال است. لطفاً بعداً تلاش کنید.');
+        await tgSendMessage(env, chat_id, 'سرویس موقتاً غیرفعال است. لطفاً بعداً تلاش کنید.', kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]));
         return;
       }
       
@@ -1658,14 +1682,12 @@ async function onCallback(cb, env) {
       const key = CONFIG.OVPN_PREFIX + `${proto}:${loc}`;
       const meta = await kvGet(env, key);
       if (!meta || !meta.file_id) {
-        await tgSendMessage(env, chat_id, `کانفیگ ${loc} (${proto}) موجود نیست. لطفاً بعداً دوباره تلاش کنید.`);
+        await tgSendMessage(env, chat_id, `کانفیگ ${loc} (${proto}) موجود نیست. لطفاً بعداً دوباره تلاش کنید.`, mainMenuInlineKb());
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       // load price from settings with fallback and ask for confirmation
-      let s = {};
-      try { s = await getSettings(env); } catch {}
-      const price = Number((s && s.ovpn_price_coins != null) ? s.ovpn_price_coins : (CONFIG.OVPN_PRICE_COINS || 5));
+      const price = await getOvpnPrice(env);
       await setUserState(env, uid, { step: 'ovpn_confirm', proto, loc, price });
       const kbBuy = kb([
         [{ text: `✅ تایید (کسر ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY})`, callback_data: 'ovpn_confirm' }],
@@ -1693,7 +1715,7 @@ async function onCallback(cb, env) {
       const u = await getUser(env, uid);
       if (!u || Number(u.balance || 0) < price) {
         await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی');
-        await tgSendMessage(env, chat_id, `برای دریافت کانفیگ نیاز به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} دارید. موجودی شما کافی نیست.`);
+        await tgSendMessage(env, chat_id, `برای دریافت کانفیگ نیاز به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} دارید. موجودی شما کافی نیست.`, kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]));
         return;
       }
       const ok = await subtractBalance(env, uid, price);
@@ -1710,12 +1732,12 @@ async function onCallback(cb, env) {
       return;
     }
     if (data === 'ps_wireguard') {
-      await tgSendMessage(env, chat_id, 'درحال توسعه');
+      await sendWip(env, chat_id, 'سرویس وایرگارد');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
     if (data === 'ps_gaming') {
-      await tgSendMessage(env, chat_id, '🎮 سرویس گیمینگ درحال توسعه است');
+      await sendWip(env, chat_id, 'سرویس گیمینگ');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -1740,7 +1762,7 @@ async function onCallback(cb, env) {
       const countries = Object.keys(map);
       if (!countries.length) {
         await tgAnswerCallbackQuery(env, cb.id, 'ناموجود');
-        await tgSendMessage(env, chat_id, '❌ در حال حاضر موجود نیست.');
+        await sendNotAvailable(env, chat_id);
         return;
       }
       const rows = [];
@@ -1768,7 +1790,7 @@ async function onCallback(cb, env) {
       const country = parts.slice(2).join(':');
       const price = Number(CONFIG.DNS_PRICE_COINS || 2);
       const count = await countAvailableDnsByCountry(env, version, country);
-      if (count <= 0) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); return; }
+      if (count <= 0) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id); return; }
       await setUserState(env, uid, { step: 'ps_dns_confirm', version, country, price });
       await tgEditMessage(env, chat_id, mid, `دریافت DNS ${version.toUpperCase()} — ${country}\nهزینه: ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY}\nموجودی ${country}: ${fmtNum(count)}\nتایید می‌کنید؟`, kb([
         [{ text: `✅ تایید`, callback_data: 'ps_dns_confirm' }],
@@ -1790,12 +1812,12 @@ async function onCallback(cb, env) {
       const price = Number(st?.price || CONFIG.DNS_PRICE_COINS || 2);
       if (!country) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
       const avail = await countAvailableDnsByCountry(env, version, country);
-      if (avail <= 0) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await tgSendMessage(env, chat_id, '❌ در حال حاضر موجود نیست.'); return; }
+      if (avail <= 0) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id); return; }
       const u = await getUser(env, uid);
       const bal = Number(u?.balance || 0);
-      if (bal < price) { await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی'); await tgSendMessage(env, chat_id, `برای دریافت دی‌ان‌اس به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`); return; }
+      if (bal < price) { await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی'); await tgSendMessage(env, chat_id, `برای دریافت دی‌ان‌اس به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`, kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]])); return; }
       const alloc = await allocateDnsForUserByCountry(env, uid, version, country);
-      if (!alloc) { await tgAnswerCallbackQuery(env, cb.id, 'خطا/ناموجود'); await tgSendMessage(env, chat_id, '❌ خطا در اختصاص دی‌ان‌اس.'); return; }
+      if (!alloc) { await tgAnswerCallbackQuery(env, cb.id, 'خطا/ناموجود'); await tgSendMessage(env, chat_id, '❌ خطا در اختصاص دی‌ان‌اس.', mainMenuInlineKb()); return; }
       const ok = await subtractBalance(env, uid, price);
       if (!ok) {
         try { await unassignDns(env, alloc.version, alloc.ip); } catch {}
@@ -1831,6 +1853,7 @@ async function onCallback(cb, env) {
         const u = await getUser(env, String(uid));
         if (!u || Number(u.balance || 0) < price) {
           await tgAnswerCallbackQuery(env, cb.id, 'موجودی کافی نیست');
+          await tgSendMessage(env, chat_id, `موجودی شما کافی نیست. برای دریافت این مورد به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`, kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]));
           return;
         }
         const before = Number(u.balance || 0);
