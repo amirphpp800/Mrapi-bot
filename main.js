@@ -19,6 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
+  BOT_VERSION: '3.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -32,14 +33,37 @@ const CONFIG = {
   PURCHASE_PREFIX: 'purchase:',
   // پرداخت و پلن‌ها (می‌توانید از طریق تنظیمات نیز override کنید)
   PLANS: [
-    { id: 'p1', coins: 10, price_label: '۵۰٬۰۰۰ تومان' },
-    { id: 'p2', coins: 25, price_label: '۱۲۰٬۰۰۰ تومان' },
-    { id: 'p3', coins: 50, price_label: '۲۳۰٬۰۰۰ تومان' },
+    { id: 'p1', coins: 5, price_label: '۱۵٬۰۰۰ تومان' },
+    { id: 'p2', coins: 10, price_label: '۲۵٬۰۰۰ تومان' },
+    { id: 'p3', coins: 15, price_label: '۳۵٬۰۰۰ تومان' },
   ],
   CARD_INFO: {
     card_number: '6219 8619 4308 4037',
     holder_name: 'امیرحسین سیاهبالائی',
     pay_note: 'لطفاً پس از پرداخت، رسید را ارسال کنید.'
+  },
+  // OpenVPN settings
+  OVPN_PRICE_COINS: 5,
+  OVPN_PREFIX: 'ovpn:',
+  OVPN_LOCATIONS: [
+    'هلند',
+    'لاتویا',
+    'لهستان',
+    'سوئیس',
+    'رومانی',
+    'آلمان',
+    'ایتالیا',
+    'آمریکا',
+  ],
+  OVPN_FLAGS: {
+    'هلند': '🇳🇱',
+    'لاتویا': '🇱🇻',
+    'لهستان': '🇵🇱',
+    'سوئیس': '🇨🇭',
+    'رومانی': '🇷🇴',
+    'آلمان': '🇩🇪',
+    'ایتالیا': '🇮🇹',
+    'آمریکا': '🇺🇸',
   },
 };
 
@@ -196,8 +220,8 @@ async function handleTokenRedeem(env, uid, chat_id, token) {
 async function getBotVersion(env) {
   try {
     const s = await getSettings(env);
-    return s?.bot_version || '2.1';
-  } catch { return '2.1'; }
+    return s?.bot_version || CONFIG.BOT_VERSION;
+  } catch { return CONFIG.BOT_VERSION; }
 }
 
 // ------------------ Build main menu header text ------------------ //
@@ -402,10 +426,15 @@ async function tgSendDocument(env, chat_id, file_id_or_url, opts = {}) {
     // ارسال سند با file_id یا URL
     const form = new FormData();
     form.set('chat_id', String(chat_id));
-    if (file_id_or_url.startsWith('http')) {
+    // پشتیبانی از آپلود فایل Blob یا ارسال با file_id/URL
+    if (file_id_or_url && typeof file_id_or_url === 'object' && (file_id_or_url.blob || (typeof Blob !== 'undefined' && file_id_or_url instanceof Blob))) {
+      const blob = file_id_or_url.blob ? file_id_or_url.blob : file_id_or_url;
+      const filename = file_id_or_url.filename || 'file.bin';
+      form.set('document', blob, filename);
+    } else if (typeof file_id_or_url === 'string' && file_id_or_url.startsWith('http')) {
       form.set('document', file_id_or_url);
     } else {
-      form.set('document', file_id_or_url);
+      form.set('document', String(file_id_or_url));
     }
     Object.entries(opts || {}).forEach(([k, v]) => {
       if (v != null) form.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
@@ -624,6 +653,7 @@ function getAdminChatIds(env) {
 function mainMenuKb(env, uid) {
   const rows = [
     [ { text: '👥 معرفی دوستان', callback_data: 'referrals' }, { text: '👤 حساب کاربری', callback_data: 'account' } ],
+    [ { text: '🖥 دریافت سرور اختصاصی', callback_data: 'private_server' } ],
     [ { text: '🎁 کد هدیه', callback_data: 'giftcode' }, { text: '🔑 دریافت با توکن', callback_data: 'redeem_token' } ],
     [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
   ];
@@ -638,6 +668,36 @@ function fmMenuKb() {
     [ { text: '📄 فایل‌های من', callback_data: 'myfiles' } ],
     [ { text: '🔙 بازگشت', callback_data: 'back_main' } ],
   ]);
+}
+
+function privateServerMenuKb() {
+  return kb([
+    [ { text: 'اوپن وی‌پی‌ان', callback_data: 'ps_openvpn' } ],
+    [ { text: 'وایرگارد', callback_data: 'ps_wireguard' } ],
+    [ { text: 'دی‌ان‌اس', callback_data: 'ps_dns' } ],
+    [ { text: '🔙 بازگشت', callback_data: 'back_main' } ],
+  ]);
+}
+
+function ovpnProtocolKb(prefix = '') {
+  // prefix: '' for user flow, 'adm_' for admin flow
+  const pre = prefix ? prefix : '';
+  return kb([
+    [ { text: 'TCP', callback_data: `${pre}ovpn_proto:TCP` }, { text: 'UDP', callback_data: `${pre}ovpn_proto:UDP` } ],
+    [ { text: '🔙 بازگشت', callback_data: prefix ? 'adm_service' : 'private_server' } ],
+  ]);
+}
+
+function ovpnLocationsKb(proto, prefix = '') {
+  const pre = prefix ? prefix : '';
+  const rows = [];
+  const list = CONFIG.OVPN_LOCATIONS || [];
+  for (const loc of list) {
+    const flag = (CONFIG.OVPN_FLAGS && CONFIG.OVPN_FLAGS[loc]) ? CONFIG.OVPN_FLAGS[loc] : '🌐';
+    rows.push([{ text: `${flag} ${loc}`, callback_data: `${pre}ovpn_loc:${proto}:${loc}` }]);
+  }
+  rows.push([{ text: '🔙 بازگشت', callback_data: prefix ? 'adm_service' : 'ps_openvpn' }]);
+  return kb(rows);
 }
 
 function adminMenuKb(settings) {
@@ -656,6 +716,8 @@ function adminMenuKb(settings) {
     [ { text: '📣 جویین اجباری', callback_data: 'adm_join' }, { text: '📊 آمار ربات', callback_data: 'adm_stats' } ],
     // Row 6: Subtract | Add Coins
     [ { text: '➖ کسر سکه', callback_data: 'adm_sub' }, { text: '➕ افزودن سکه', callback_data: 'adm_add' } ],
+    // Row 7: Backup
+    [ { text: '🧰 بکاپ دیتابیس', callback_data: 'adm_backup' } ],
     // Row 7: Help + Broadcast in same row
     [ { text: '📘 راهنما', callback_data: 'help' }, { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
   ]);
@@ -906,6 +968,35 @@ async function onMessage(msg, env) {
       
       // اگر ادمین در فلو آپلود است (پشتیبانی از فایل‌های مختلف)
       const st = await getUserState(env, uid);
+      // Admin: OpenVPN upload flow (expects .ovpn as Document)
+      if (isAdminUser(env, uid) && st?.step === 'adm_ovpn_wait_file') {
+        if (msg.document && msg.document.file_id) {
+          const proto = String((st.proto || '')).toUpperCase();
+          const loc = String(st.loc || '');
+          if (!['TCP','UDP'].includes(proto) || !loc) {
+            await clearUserState(env, uid);
+            await tgSendMessage(env, chat_id, 'خطا در اطلاعات پروتکل/لوکیشن. از ابتدا تلاش کنید.');
+            return;
+          }
+          const key = CONFIG.OVPN_PREFIX + `${proto}:${loc}`;
+          const meta = {
+            proto,
+            loc,
+            file_id: msg.document.file_id,
+            file_name: msg.document.file_name || 'config.ovpn',
+            file_size: msg.document.file_size || 0,
+            mime_type: msg.document.mime_type || 'application/octet-stream',
+            uploader_id: uid,
+            ts: nowTs(),
+          };
+          await kvSet(env, key, meta);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `✅ کانفیگ اوپن وی‌پی‌ان ذخیره شد.\n${loc} (${proto})`);
+          return;
+        }
+        await tgSendMessage(env, chat_id, 'لطفاً فایل .ovpn را به صورت سند (Document) ارسال کنید.');
+        return;
+      }
       if (isAdminUser(env, uid) && st?.step === 'adm_upload_wait_file') {
         let tmp = null;
         if (msg.document) {
@@ -1342,6 +1433,13 @@ async function onCallback(cb, env) {
       return;
     }
 
+    if (data === 'private_server') {
+      const hdr = '🖥 دریافت سرور اختصاصی\nیکی از گزینه‌های زیر را انتخاب کنید:';
+      await tgSendMessage(env, chat_id, hdr, privateServerMenuKb());
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
     if (data === 'account') {
       const u = await getUser(env, uid);
       const bal = fmtNum(u?.balance || 0);
@@ -1380,6 +1478,63 @@ async function onCallback(cb, env) {
     if (data === 'giftcode') {
       await setUserState(env, uid, { step: 'giftcode_wait' });
       await tgSendMessage(env, chat_id, '🎁 لطفاً کد هدیه را ارسال کنید. /update برای لغو');
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data === 'ps_openvpn') {
+      const txt = 'اوپن وی‌پی‌ان\nابتدا پروتکل را انتخاب کنید:';
+      await tgSendMessage(env, chat_id, txt, ovpnProtocolKb());
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data.startsWith('ovpn_proto:')) {
+      const proto = (data.split(':')[1] || '').toUpperCase();
+      if (!['TCP','UDP'].includes(proto)) { await tgAnswerCallbackQuery(env, cb.id, 'پروتکل نامعتبر'); return; }
+      await setUserState(env, uid, { step: 'ovpn_pick_loc', proto });
+      await tgSendMessage(env, chat_id, `پروتکل انتخاب‌شده: ${proto}\nیکی از لوکیشن‌ها را انتخاب کنید:`, ovpnLocationsKb(proto));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data.startsWith('ovpn_loc:')) {
+      const parts = data.split(':');
+      const proto = (parts[1] || '').toUpperCase();
+      const loc = parts.slice(2).join(':');
+      if (!['TCP','UDP'].includes(proto) || !loc) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+      const key = CONFIG.OVPN_PREFIX + `${proto}:${loc}`;
+      const meta = await kvGet(env, key);
+      if (!meta || !meta.file_id) {
+        await tgSendMessage(env, chat_id, `کانفیگ ${loc} (${proto}) موجود نیست. لطفاً بعداً دوباره تلاش کنید.`);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      // price check and charge
+      const price = Number(CONFIG.OVPN_PRICE_COINS || 5);
+      const u = await getUser(env, uid);
+      if (!u || Number(u.balance || 0) < price) {
+        await tgSendMessage(env, chat_id, `برای دریافت کانفیگ نیاز به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} دارید. موجودی شما کافی نیست.`);
+        await tgAnswerCallbackQuery(env, cb.id, 'موجودی ناکافی');
+        return;
+      }
+      const ok = await subtractBalance(env, uid, price);
+      if (!ok) { await tgAnswerCallbackQuery(env, cb.id, 'خطا در کسر'); return; }
+      try { await tgSendMessage(env, chat_id, `✅ ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} کسر شد. در حال ارسال کانفیگ...`); } catch {}
+      await tgSendDocument(env, chat_id, meta.file_id, { caption: `اوپن وی‌پی‌ان — ${loc} (${proto})` });
+      // Stats: purchases and revenue
+      await bumpStat(env, 'ovpn_purchases');
+      await incStat(env, 'ovpn_revenue_coins', price);
+      await bumpStat(env, `ovpn_${proto}`);
+      await bumpStat(env, `ovpn_loc_${loc}`);
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data === 'ps_wireguard') {
+      await tgSendMessage(env, chat_id, 'درحال توسعه');
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data === 'ps_dns') {
+      await tgSendMessage(env, chat_id, 'درحال توسعه');
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -1676,11 +1831,34 @@ async function onCallback(cb, env) {
         const disabledCount = Array.isArray(s.disabled_buttons) ? s.disabled_buttons.length : 0;
         const btns = [
           [{ text: ` مدیریت دکمه‌های غیرفعال (${disabledCount})`, callback_data: 'adm_buttons' }],
+          [{ text: '📥 آپلود اوپن وی پی ان', callback_data: 'adm_ovpn_upload' }],
           [{ text: ' بازگشت', callback_data: 'admin' }],
         ];
         const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nتعداد دکمه‌های غیرفعال: ${disabledCount}`;
         const kbSrv = kb(btns);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_ovpn_upload') {
+        await tgEditMessage(env, chat_id, mid, 'آپلود اوپن وی پی ان\nابتدا پروتکل را انتخاب کنید:', ovpnProtocolKb('adm_'));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_ovpn_proto:')) {
+        const proto = (data.split(':')[1] || '').toUpperCase();
+        if (!['TCP','UDP'].includes(proto)) { await tgAnswerCallbackQuery(env, cb.id, 'پروتکل نامعتبر'); return; }
+        await tgEditMessage(env, chat_id, mid, `پروتکل: ${proto}\nلطفاً لوکیشن را انتخاب کنید:`, ovpnLocationsKb(proto, 'adm_'));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_ovpn_loc:')) {
+        const parts = data.split(':');
+        const proto = (parts[1] || '').toUpperCase();
+        const loc = parts.slice(2).join(':');
+        if (!['TCP','UDP'].includes(proto) || !loc) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        await setUserState(env, uid, { step: 'adm_ovpn_wait_file', proto, loc });
+        await tgEditMessage(env, chat_id, mid, `ارسال فایل .ovpn برای ${loc} (${proto})\nلطفاً فایل را به صورت سند (Document) ارسال کنید.`, kb([[{ text: '🔙 بازگشت', callback_data: 'adm_service' }]]));
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -1804,7 +1982,21 @@ async function onCallback(cb, env) {
         const users = fmtNum(stats.users || 0);
         const files = fmtNum(stats.files || 0);
         const updates = fmtNum(stats.updates || 0);
-        const txt = ` آمار ربات\nکاربران: ${users}\nفایل‌ها: ${files}\nبه‌روزرسانی‌ها: ${updates}`;
+        const ovpnPurch = fmtNum(stats.ovpn_purchases || 0);
+        const ovpnRev = fmtNum(stats.ovpn_revenue_coins || 0);
+        const ovpnTCP = fmtNum(stats.ovpn_TCP || 0);
+        const ovpnUDP = fmtNum(stats.ovpn_UDP || 0);
+        const txt = [
+          ' آمار ربات',
+          `کاربران: ${users}`,
+          `فایل‌ها: ${files}`,
+          `به‌روزرسانی‌ها: ${updates}`,
+          '',
+          '— اوپن وی‌پی‌ان —',
+          `تعداد دریافت کانفیگ: ${ovpnPurch}`,
+          `درآمد (سکه): ${ovpnRev}`,
+          `TCP: ${ovpnTCP} | UDP: ${ovpnUDP}`,
+        ].join('\n');
         await tgAnswerCallbackQuery(env, cb.id);
         await tgEditMessage(env, chat_id, mid, txt, adminMenuKb(await getSettings(env)));
         return;
@@ -1986,7 +2178,21 @@ async function onCallback(cb, env) {
         return;
       }
       if (data === 'adm_backup') {
-        await tgAnswerCallbackQuery(env, cb.id, 'بکاپ صرفاً از داخل ربات نمایش داده می‌شود.');
+        try {
+          // ساخت بکاپ مرتب از تمام کلیدهای KV
+          const raw = await buildBackup(env);
+          const pretty = JSON.stringify(raw, null, 2);
+          const ts = new Date();
+          const pad = (n) => String(n).padStart(2, '0');
+          const fname = `backup-${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.json`;
+          const blob = new Blob([pretty], { type: 'application/json' });
+          await tgSendDocument(env, chat_id, { blob, filename: fname }, { caption: `🧰 بکاپ دیتابیس — ${fname}` });
+          await tgAnswerCallbackQuery(env, cb.id, 'بکاپ ارسال شد');
+        } catch (e) {
+          console.error('adm_backup error', e);
+          await tgAnswerCallbackQuery(env, cb.id, 'خطا در بکاپ');
+          await tgSendMessage(env, chat_id, '❌ خطا در تهیه بکاپ.');
+        }
         return;
       }
     }
@@ -2290,6 +2496,17 @@ async function bumpStat(env, key) {
   } catch (e) { console.error('bumpStat error', e); }
 }
 async function getStats(env) { return (await kvGet(env, CONFIG.BASE_STATS_KEY)) || {}; }
+
+// Increase a numeric stat by an arbitrary delta (can be negative)
+async function incStat(env, key, delta = 1) {
+  try {
+    const stats = (await kvGet(env, CONFIG.BASE_STATS_KEY)) || {};
+    const cur = Number(stats[key] || 0);
+    const d = Number(delta || 0);
+    stats[key] = cur + d;
+    await kvSet(env, CONFIG.BASE_STATS_KEY, stats);
+  } catch (e) { console.error('incStat error', e); }
+}
 
 async function buildBackup(env) {
   try {
