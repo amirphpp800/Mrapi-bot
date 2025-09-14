@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '5.0',
+  BOT_VERSION: '1.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -1958,6 +1958,16 @@ async function onCallback(cb, env) {
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
+      if (data === 'adm_backup') {
+        await tgAnswerCallbackQuery(env, cb.id, 'در حال تهیه بکاپ...');
+        const pretty = await buildPrettyBackup(env);
+        const json = JSON.stringify(pretty, null, 2);
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `backup-${ts}.json`;
+        const blob = new Blob([json], { type: 'application/json' });
+        await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📦 بکاپ کامل دیتابیس\nفایل: <code>${filename}</code>` });
+        return;
+      }
       if (data === 'adm_ovpn_upload') {
         await tgEditMessage(env, chat_id, mid, 'آپلود اوپن وی پی ان\nابتدا پروتکل را انتخاب کنید:', ovpnProtocolKb('adm_'));
         await tgAnswerCallbackQuery(env, cb.id);
@@ -2649,6 +2659,60 @@ async function buildBackup(env) {
     }
     return all;
   } catch (e) { console.error('buildBackup error', e); return {}; }
+}
+
+// Build a pretty, structured backup JSON for export
+async function buildPrettyBackup(env) {
+  try {
+    const list = await env.BOT_KV.list({ prefix: '' });
+    const out = {
+      meta: {
+        bot_name: CONFIG.BOT_NAME,
+        bot_version: await getBotVersion(env),
+        generated_at: new Date().toISOString(),
+      },
+      settings: {},
+      stats: {},
+      users: {},
+      files: {},
+      tickets: {},
+      gifts: {},
+      purchases: {},
+      ovpn: {},
+      blocked_users: {},
+      other: {},
+    };
+    for (const k of list.keys) {
+      const key = k.name;
+      const raw = await kvGet(env, key, 'text');
+      // Try to parse JSON content where applicable
+      let val = raw;
+      try { val = JSON.parse(raw); } catch {}
+      if (key === CONFIG.SERVICE_TOGGLE_KEY) { out.settings = val; continue; }
+      if (key === CONFIG.BASE_STATS_KEY) { out.stats = val; continue; }
+      if (key.startsWith(CONFIG.USER_PREFIX) && !key.includes(':state')) {
+        out.users[key.replace(CONFIG.USER_PREFIX,'')] = val;
+        continue;
+      }
+      if (key.startsWith(CONFIG.USER_PREFIX) && key.endsWith(':state')) {
+        const uid = key.substring(CONFIG.USER_PREFIX.length, key.length - ':state'.length);
+        out.users[uid] = out.users[uid] || {};
+        out.users[uid].state = val;
+        continue;
+      }
+      if (key.startsWith(CONFIG.FILE_PREFIX)) { out.files[key.replace(CONFIG.FILE_PREFIX,'')] = val; continue; }
+      if (key.startsWith(CONFIG.TICKET_PREFIX)) { out.tickets[key.replace(CONFIG.TICKET_PREFIX,'')] = val; continue; }
+      if (key.startsWith(CONFIG.GIFT_PREFIX)) { out.gifts[key.replace(CONFIG.GIFT_PREFIX,'')] = val; continue; }
+      if (key.startsWith(CONFIG.PURCHASE_PREFIX)) { out.purchases[key.replace(CONFIG.PURCHASE_PREFIX,'')] = val; continue; }
+      if (key.startsWith(CONFIG.OVPN_PREFIX)) { out.ovpn[key.replace(CONFIG.OVPN_PREFIX,'')] = val; continue; }
+      if (key.startsWith(CONFIG.BLOCK_PREFIX)) { out.blocked_users[key.replace(CONFIG.BLOCK_PREFIX,'')] = val; continue; }
+      out.other[key] = val;
+    }
+    return out;
+  } catch (e) {
+    console.error('buildPrettyBackup error', e);
+    return {};
+  }
 }
 
 async function getBaseUrlFromBot(env) {
