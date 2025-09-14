@@ -1203,6 +1203,21 @@ async function onMessage(msg, env) {
           const version = state.version === 'v6' ? 'v6' : 'v4';
           const country = String(text || '').trim();
           if (!country) { await tgSendMessage(env, chat_id, '❌ کشور نامعتبر است. لطفاً مجدداً ارسال کنید:'); return; }
+          // If this country already exists, append to that location using its existing flag and skip flag step
+          const existingFlag = await getExistingFlagForCountry(env, version, country);
+          if (existingFlag) {
+            const countBefore = await countAvailableDns(env, version);
+            const added = await putDnsAddresses(env, version, state.ips, country, existingFlag, uid);
+            const countAfter = await countAvailableDns(env, version);
+            await clearUserState(env, uid);
+            await tgSendMessage(env, chat_id, `✅ به لوکیشن موجود اضافه شد.
+نسخه: ${version.toUpperCase()}
+لوکیشن: ${existingFlag} ${country}
+تعداد افزوده‌شده: ${fmtNum(added)}
+موجودی قبل: ${fmtNum(countBefore)} | موجودی فعلی: ${fmtNum(countAfter)}`);
+            return;
+          }
+          // Otherwise ask for a flag to create a new location group
           await setUserState(env, uid, { step: 'adm_dns_add_flag', version, ips: state.ips, country });
           await tgSendMessage(env, chat_id, 'پرچم/ایموجی لوکیشن را ارسال کنید (مثال: 🇺🇸). برای پیشفرض "🌐"، همان را ارسال کنید.');
           return;
@@ -2911,6 +2926,22 @@ async function allocateDnsForUserByCountry(env, uid, version, country) {
     }
     return null;
   } catch (e) { console.error('allocateDnsForUserByCountry error', e); return null; }
+}
+
+// Return an existing flag for a country if any DNS entry exists for that country
+async function getExistingFlagForCountry(env, version, country) {
+  try {
+    const prefix = dnsPrefix(version);
+    const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (!v) continue;
+      if (String(v.country || '') === String(country || '')) {
+        return v.flag || '🌐';
+      }
+    }
+    return '';
+  } catch (e) { console.error('getExistingFlagForCountry error', e); return ''; }
 }
 
 async function getSettings(env) {
