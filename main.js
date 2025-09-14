@@ -736,8 +736,8 @@ function adminMenuKb(settings) {
     [ { text: '🧰 بکاپ دیتابیس', callback_data: 'adm_backup' } ],
     // Row 7: Help + Broadcast in same row
     [ { text: '📘 راهنما', callback_data: 'help' }, { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
-    // Row: Block/Unblock User with emojis
-    [ { text: 'بلاک ⛔️', callback_data: 'adm_block' }, { text: 'انبلاک 📛', callback_data: 'adm_unblock' } ],
+    // Row: Block/Unblock User with emojis (Unblock on left, Block on right)
+    [ { text: 'انبلاک 📛', callback_data: 'adm_unblock' }, { text: 'بلاک ⛔️', callback_data: 'adm_block' } ],
   ]);
 }
 
