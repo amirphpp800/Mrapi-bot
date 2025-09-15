@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '2.0',
+  BOT_VERSION: '2.1',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -249,13 +249,19 @@ async function tgGetMe(env) {
 
 async function getBotUsername(env) {
   try {
+    // Per-request cache to avoid repeated API calls
+    if (env && env.__botUsernameCache) return env.__botUsernameCache;
     const s = await getSettings(env);
-    if (s?.bot_username) return s.bot_username;
+    if (s?.bot_username) {
+      if (env) env.__botUsernameCache = s.bot_username;
+      return s.bot_username;
+    }
     const me = await tgGetMe(env);
     const u = me?.result?.username;
     if (u) {
       s.bot_username = u;
       await setSettings(env, s);
+      if (env) env.__botUsernameCache = u;
       return u;
     }
     return '';
@@ -541,6 +547,8 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
     }
     if (!channels.length) return true; // No mandatory channels configured
 
+    // Prepare join keyboard once (avoid rebuilding it repeatedly)
+    const joinKb = await buildJoinKb(env);
     // Try to check membership; if API fails, optionally show prompt
     for (const chRaw of channels) {
       try {
@@ -575,14 +583,14 @@ async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
         const isMember = status && !['left', 'kicked'].includes(status);
         if (!isMember) {
           if (!silent) {
-            await tgSendMessage(env, chat_id, '📣 برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه «بررسی عضویت» را بزنید:', await buildJoinKb(env));
+            await tgSendMessage(env, chat_id, '📣 برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه «بررسی عضویت» را بزنید:', joinKb);
           }
           return false;
         }
       } catch (e) {
         // On temporary Telegram errors, avoid blocking; optionally show guide
         if (!silent) {
-          await tgSendMessage(env, chat_id, '📣 برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه «بررسی عضویت» را بزنید:', await buildJoinKb(env));
+          await tgSendMessage(env, chat_id, '📣 برای استفاده از ربات ابتدا عضو کانال‌های زیر شوید سپس دکمه «بررسی عضویت» را بزنید:', joinKb);
         }
         return false;
       }
@@ -741,7 +749,6 @@ function ovpnProtocolKb(prefix = '') {
   const pre = prefix ? prefix : '';
   const rows = [
     [ { text: 'TCP', callback_data: `${pre}ovpn_proto:TCP` }, { text: 'UDP', callback_data: `${pre}ovpn_proto:UDP` } ],
-    [ { text: '🎮 گیمینگ', callback_data: 'ps_gaming' } ],
     [ { text: '🔙 بازگشت', callback_data: prefix ? 'adm_service' : 'private_server' } ],
   ];
   if (prefix) rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
@@ -832,7 +839,16 @@ async function handleWebhook(request, env, ctx) {
   }
   let update = null;
   try { update = await request.json(); } catch (e) { console.error('handleWebhook: bad json', e); return new Response('bad json', { status: 200 }); }
-  try { console.log('webhook update:', JSON.stringify(update)); } catch {}
+  try {
+    const summary = update?.message
+      ? { type: 'message', from: update.message?.from?.id, chat: update.message?.chat?.id }
+      : update?.callback_query
+      ? { type: 'callback', from: update.callback_query?.from?.id, data: update.callback_query?.data }
+      : update?.inline_query
+      ? { type: 'inline', from: update.inline_query?.from?.id }
+      : { type: 'other' };
+    console.log('webhook update:', summary);
+  } catch {}
 
   ctx.waitUntil(processUpdate(update, env));
   // پاسخ سریع به تلگرام
@@ -1740,11 +1756,7 @@ async function onCallback(cb, env) {
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
-    if (data === 'ps_gaming') {
-      await sendWip(env, chat_id, 'سرویس گیمینگ');
-      await tgAnswerCallbackQuery(env, cb.id);
-      return;
-    }
+    
     if (data === 'ps_dns') {
       const v4 = await countAvailableDns(env, 'v4');
       const v6 = await countAvailableDns(env, 'v6');
@@ -2980,6 +2992,8 @@ async function getExistingFlagForCountry(env, version, country) {
 }
 
 async function getSettings(env) {
+  // Per-request cache to avoid repeated KV reads
+  if (env && env.__settingsCache) return env.__settingsCache;
   const s = (await kvGet(env, CONFIG.SERVICE_TOGGLE_KEY)) || {};
   if (typeof s.service_enabled === 'undefined') s.service_enabled = true;
   // granular disabled buttons list
@@ -2993,9 +3007,15 @@ async function getSettings(env) {
   if (!s.card_info || typeof s.card_info !== 'object') { s.card_info = CONFIG.CARD_INFO; changed = true; }
   if (!s.support_url) { s.support_url = 'https://t.me/NeoDebug'; changed = true; }
   if (changed) { try { await setSettings(env, s); } catch {} }
+  if (env) env.__settingsCache = s;
   return s;
 }
-async function setSettings(env, s) { return kvSet(env, CONFIG.SERVICE_TOGGLE_KEY, s); }
+async function setSettings(env, s) {
+  const ok = await kvSet(env, CONFIG.SERVICE_TOGGLE_KEY, s);
+  // Update per-request cache so subsequent reads see the new settings
+  if (env) env.__settingsCache = s;
+  return ok;
+}
 
 async function bumpStat(env, key) {
   try {
