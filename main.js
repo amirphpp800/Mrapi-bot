@@ -1364,6 +1364,16 @@ async function onMessage(msg, env) {
         const tmp = state.tmp || {};
         const title = String(state.title || '').trim();
         if (!title || (!tmp.file_id && tmp.kind !== 'text')) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ خطا. از ابتدا تلاش کنید.'); return; }
+        await setUserState(env, uid, { step: 'adm_cbtn_limit', tmp, title, price: price >= 0 ? price : 0 });
+        await tgSendMessage(env, chat_id, '👥 محدودیت تعداد دریافت‌کنندگان یکتا را ارسال کنید (برای بدون محدودیت 0 بفرستید):');
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit') {
+        const maxUsers = Number(String(text||'').replace(/[^0-9]/g, ''));
+        const tmp = state.tmp || {};
+        const title = String(state.title || '').trim();
+        const price = Number(state.price || 0);
+        if (!title || (!tmp.file_id && tmp.kind !== 'text')) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ خطا. از ابتدا تلاش کنید.'); return; }
         const id = newToken(8);
         const meta = {
           id,
@@ -1379,10 +1389,9 @@ async function onMessage(msg, env) {
           disabled: false,
           paid_users: [],
           users: [],
-          max_users: 0,
+          max_users: maxUsers >= 0 ? maxUsers : 0,
         };
         await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, meta);
-        // Append to settings list
         const s = await getSettings(env);
         const list = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
         if (!list.includes(id)) list.push(id);
@@ -1390,7 +1399,7 @@ async function onMessage(msg, env) {
         await setSettings(env, s);
         await clearUserState(env, uid);
         await rebuildCustomButtonsCache(env);
-        await tgSendMessage(env, chat_id, `✅ دکمه افزوده شد: <b>${htmlEscape(title)}</b> — قیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}`, mainMenuInlineKb());
+        await tgSendMessage(env, chat_id, `✅ دکمه افزوده شد: <b>${htmlEscape(title)}</b> — قیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: <b>${fmtNum(meta.max_users)}</b>`, mainMenuInlineKb());
         return;
       }
       if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_price_change' && state?.id) {
