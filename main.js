@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '2.1',
+  BOT_VERSION: '2.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -32,6 +32,8 @@ const CONFIG = {
   REF_DONE_PREFIX: 'ref:done:',
   PURCHASE_PREFIX: 'purchase:',
   BLOCK_PREFIX: 'blocked:',
+  // Custom purchasable buttons
+  CUSTOMBTN_PREFIX: 'cbtn:',
   // پرداخت و پلن‌ها (می‌توانید از طریق تنظیمات نیز override کنید)
   PLANS: [
     { id: 'p1', coins: 5, price_label: '۱۵٬۰۰۰ تومان' },
@@ -73,6 +75,53 @@ const CONFIG = {
 };
 
 // صفحات فانکشنز env: { BOT_KV }
+
+// Deliver custom button content to user with payment check
+async function deliverCustomButtonToUser(env, uid, chat_id, id) {
+  try {
+    const meta = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+    if (!meta || meta.disabled) { await tgSendMessage(env, chat_id, 'این مورد یافت نشد یا غیرفعال است.', mainMenuInlineKb()); return false; }
+    const price = Number(meta.price || 0);
+    const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
+    const alreadyPaid = paidUsers.includes(String(uid));
+    const users = Array.isArray(meta.users) ? meta.users : [];
+    const alreadyReceived = users.includes(String(uid));
+    const maxUsers = Number(meta.max_users || 0);
+    if (!alreadyReceived && maxUsers > 0 && users.length >= maxUsers) {
+      await tgSendMessage(env, chat_id, 'ظرفیت دریافت این مورد تکمیل شده است.', mainMenuInlineKb());
+      return false;
+    }
+    if (price > 0 && !alreadyPaid) {
+      const u = await getUser(env, String(uid));
+      if (!u || Number(u.balance || 0) < price) {
+        await tgSendMessage(env, chat_id, `برای دریافت این مورد به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`, mainMenuInlineKb());
+        return false;
+      }
+      // charge and mark paid
+      u.balance = Number(u.balance || 0) - price;
+      await setUser(env, String(uid), u);
+      paidUsers.push(String(uid));
+      meta.paid_users = paidUsers;
+      await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, meta);
+    }
+    // deliver
+    const kind = meta.kind || 'document';
+    if (kind === 'photo') {
+      await tgSendPhoto(env, chat_id, meta.file_id, { caption: `🖼 ${meta.file_name || ''}` });
+    } else if (kind === 'text') {
+      const content = meta.text || meta.file_name || '—';
+      await tgSendMessage(env, chat_id, `📄 محتوا:\n${content}`);
+    } else {
+      await tgSendDocument(env, chat_id, meta.file_id, { caption: `${kindIcon(kind)} ${meta.file_name || ''}` });
+    }
+    if (!alreadyReceived) {
+      users.push(String(uid));
+      meta.users = users;
+      await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, meta);
+    }
+    return true;
+  } catch (e) { console.error('deliverCustomButtonToUser error', e); await tgSendMessage(env, chat_id, 'خطا در ارسال محتوا.'); return false; }
+}
 
 // پنل مدیریت یک فایل
 function buildFileAdminKb(meta) {
@@ -654,6 +703,52 @@ async function sendNotAvailable(env, chat_id, note = '❌ در حال حاضر �
   try { await tgSendMessage(env, chat_id, note, mainMenuInlineKb()); } catch {}
 }
 
+// ------------------ Custom purchasable buttons helpers ------------------ //
+function buildCustomButtonsRowsCached(env) {
+  try { return Array.isArray(env?.__cbtnRowsCache) ? env.__cbtnRowsCache : []; } catch { return []; }
+}
+
+async function rebuildCustomButtonsCache(env) {
+  try {
+    const s = await getSettings(env);
+    const ids = Array.isArray(s?.custom_buttons) ? s.custom_buttons : [];
+    const items = [];
+    for (const id of ids) {
+      const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+      if (m && !m.disabled) items.push(m);
+    }
+    // Layout: long labels single row, short labels two per row
+    const rows = [];
+    const shortBuf = [];
+    const isLong = (title) => String(title || '').length > 12; // heuristic
+    for (const it of items) {
+      const btn = { text: String(it.title || '—'), callback_data: 'cbtn:' + it.id };
+      if (isLong(it.title)) {
+        // flush short buffer first
+        if (shortBuf.length === 1) rows.push([ shortBuf.pop() ]);
+        if (shortBuf.length === 2) rows.push([ shortBuf.shift(), shortBuf.shift() ]);
+        rows.push([ btn ]);
+      } else {
+        shortBuf.push(btn);
+        if (shortBuf.length === 2) {
+          rows.push([ shortBuf.shift(), shortBuf.shift() ]);
+        }
+      }
+    }
+    // flush remaining shorts
+    if (shortBuf.length === 1) rows.push([ shortBuf.pop() ]);
+    if (shortBuf.length === 2) rows.push([ shortBuf.shift(), shortBuf.shift() ]);
+    env.__cbtnRowsCache = rows;
+    return rows;
+  } catch (e) { console.error('rebuildCustomButtonsCache error', e); env.__cbtnRowsCache = []; return []; }
+}
+
+function marketplaceKb(env) {
+  const rows = buildCustomButtonsRowsCached(env).slice();
+  rows.push([{ text: '🔙 بازگشت', callback_data: 'back_main' }]);
+  return kb(rows);
+}
+
 // Get OVPN price from settings with fallback
 async function getOvpnPrice(env) {
   try {
@@ -679,7 +774,6 @@ function getKnownUserButtons() {
     { label: '👤 حساب کاربری', data: 'account' },
     { label: '👥 زیرمجموعه‌گیری', data: 'referrals' },
     { label: '🎁 کد هدیه', data: 'giftcode' },
-    { label: '🔑 وارد کردن توکن فایل', data: 'redeem_token' },
     { label: '🪙 خرید سکه', data: 'buy_coins' },
     { label: '🎟 ثبت تیکت', data: 'ticket_new' },
     { label: '🔙 بازگشت', data: 'back_main' },
@@ -712,7 +806,8 @@ function mainMenuKb(env, uid) {
   const rows = [
     [ { text: '👥 معرفی دوستان', callback_data: 'referrals' }, { text: '👤 حساب کاربری', callback_data: 'account' } ],
     [ { text: '🛡 دریافت سرور اختصاصی', callback_data: 'private_server' } ],
-    [ { text: '🎁 کد هدیه', callback_data: 'giftcode' }, { text: '🔑 دریافت با توکن', callback_data: 'redeem_token' } ],
+    [ { text: '🎁 کد هدیه', callback_data: 'giftcode' } ],
+    [ { text: '💰 بازارچه', callback_data: 'market' } ],
     [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
   ];
   if (isAdminUser(env, uid)) {
@@ -800,6 +895,8 @@ function adminMenuKb(settings) {
     [ { text: '📘 راهنما', callback_data: 'help' }, { text: '📢 پیام همگانی', callback_data: 'adm_broadcast' } ],
     // Row: Block/Unblock User with emojis (Unblock on left, Block on right)
     [ { text: 'انبلاک 📛', callback_data: 'adm_unblock' }, { text: 'بلاک ⛔️', callback_data: 'adm_block' } ],
+    // Marketplace management
+    [ { text: '🛒 مدیریت بازارچه', callback_data: 'adm_cbtn' } ],
     // Always show a button to go back to the bot main menu
     [ { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' } ],
   ]);
@@ -1131,6 +1228,54 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '💰 قیمت فایل به سکه را ارسال کنید (مثلاً 10):');
         return;
       }
+      // Admin: Replace content — handle media replacement
+      if (isAdminUser(env, uid) && st?.step === 'adm_cbtn_replace_wait' && st?.id) {
+        let tmp = null;
+        if (msg.document) {
+          tmp = { kind: 'document', file_id: msg.document.file_id, file_name: msg.document.file_name || 'file', file_size: msg.document.file_size || 0, mime_type: msg.document.mime_type || 'application/octet-stream' };
+        } else if (msg.photo && msg.photo.length) {
+          const largest = msg.photo[msg.photo.length - 1];
+          tmp = { kind: 'photo', file_id: largest.file_id, file_name: 'photo', file_size: largest.file_size || 0, mime_type: 'image/jpeg' };
+        } else if (msg.video) {
+          tmp = { kind: 'video', file_id: msg.video.file_id, file_name: msg.video.file_name || 'video', file_size: msg.video.file_size || 0, mime_type: msg.video.mime_type || 'video/mp4' };
+        } else if (msg.audio) {
+          tmp = { kind: 'audio', file_id: msg.audio.file_id, file_name: msg.audio.file_name || 'audio', file_size: msg.audio.file_size || 0, mime_type: msg.audio.mime_type || 'audio/mpeg' };
+        }
+        if (!tmp) { await tgSendMessage(env, chat_id, '❌ نوع فایل پشتیبانی نمی‌شود. برای متن، خود متن را ارسال کنید.'); return; }
+        const id = st.id;
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (!m) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ دکمه یافت نشد.'); return; }
+        m.kind = tmp.kind;
+        m.file_id = tmp.file_id; m.file_name = tmp.file_name; m.file_size = tmp.file_size; m.mime_type = tmp.mime_type; m.text = undefined;
+        await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m);
+        await clearUserState(env, uid);
+        await rebuildCustomButtonsCache(env);
+        await tgSendMessage(env, chat_id, '✅ محتوا جایگزین شد.', mainMenuInlineKb());
+        return;
+      }
+      if (isAdminUser(env, uid) && st?.step === 'adm_cbtn_wait_file') {
+        let tmp = null;
+        if (msg.document) {
+          tmp = {
+            kind: 'document',
+            file_id: msg.document.file_id,
+            file_name: msg.document.file_name || 'file',
+            file_size: msg.document.file_size || 0,
+            mime_type: msg.document.mime_type || 'application/octet-stream',
+          };
+        } else if (msg.photo && msg.photo.length) {
+          const largest = msg.photo[msg.photo.length - 1];
+          tmp = { kind: 'photo', file_id: largest.file_id, file_name: 'photo', file_size: largest.file_size || 0, mime_type: 'image/jpeg' };
+        } else if (msg.video) {
+          tmp = { kind: 'video', file_id: msg.video.file_id, file_name: msg.video.file_name || 'video', file_size: msg.video.file_size || 0, mime_type: msg.video.mime_type || 'video/mp4' };
+        } else if (msg.audio) {
+          tmp = { kind: 'audio', file_id: msg.audio.file_id, file_name: msg.audio.file_name || 'audio', file_size: msg.audio.file_size || 0, mime_type: msg.audio.mime_type || 'audio/mpeg' };
+        }
+        if (!tmp) { await tgSendMessage(env, chat_id, 'نوع فایل پشتیبانی نمی‌شود. برای متن، خود متن را ارسال کنید.'); return; }
+        await setUserState(env, uid, { step: 'adm_cbtn_title', tmp });
+        await tgSendMessage(env, chat_id, '📝 عنوان دکمه را ارسال کنید:');
+        return;
+      }
 
       // در حالت عادی (آپلود کاربر عادی با Document و ...)
       if (msg.document && !isAdminUser(env, uid)) {
@@ -1162,6 +1307,13 @@ async function onMessage(msg, env) {
     if (text) {
       // Handle stateful flows for giftcode/redeem
       const state = await getUserState(env, uid);
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_wait_file') {
+        // Admin provided text content for custom button
+        const tmp = { kind: 'text', text: String(text || '') };
+        await setUserState(env, uid, { step: 'adm_cbtn_title', tmp });
+        await tgSendMessage(env, chat_id, '📝 عنوان دکمه را ارسال کنید:');
+        return;
+      }
       if (state?.step === 'giftcode_wait') {
         // Backward-compatible: treat like gift_redeem_wait
         const code = String((text||'').trim());
@@ -1198,6 +1350,100 @@ async function onMessage(msg, env) {
         if (!tmp.file_id) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'خطا. دوباره تلاش کنید.'); return; }
         await setUserState(env, uid, { step: 'adm_upload_limit', tmp, price: amount >= 0 ? amount : 0 });
         await tgSendMessage(env, chat_id, '🔢 محدودیت تعداد دریافت‌کنندگان یکتا را ارسال کنید (مثلاً 2). برای بدون محدودیت 0 بفرستید:');
+        return;
+      }
+      // Admin: Custom Button — after receiving media/text, ask for title
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_title') {
+        const title = String(text || '').trim();
+        if (!title) { await tgSendMessage(env, chat_id, '❌ عنوان نامعتبر است. دوباره ارسال کنید:'); return; }
+        await setUserState(env, uid, { step: 'adm_cbtn_price', tmp: state.tmp, title });
+        await tgSendMessage(env, chat_id, '💰 قیمت به سکه برای این دکمه را ارسال کنید (مثلاً 5):');
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_price') {
+        const price = Number(text.replace(/[^0-9]/g, ''));
+        const tmp = state.tmp || {};
+        const title = String(state.title || '').trim();
+        if (!title || (!tmp.file_id && tmp.kind !== 'text')) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ خطا. از ابتدا تلاش کنید.'); return; }
+        const id = newToken(8);
+        const meta = {
+          id,
+          title,
+          price: price >= 0 ? price : 0,
+          kind: tmp.kind || 'document',
+          file_id: tmp.file_id,
+          file_name: tmp.file_name,
+          file_size: tmp.file_size,
+          mime_type: tmp.mime_type,
+          text: tmp.kind === 'text' ? (tmp.text || '') : undefined,
+          created_at: nowTs(),
+          disabled: false,
+          paid_users: [],
+          users: [],
+          max_users: 0,
+        };
+        await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, meta);
+        // Append to settings list
+        const s = await getSettings(env);
+        const list = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
+        if (!list.includes(id)) list.push(id);
+        s.custom_buttons = list;
+        await setSettings(env, s);
+        await clearUserState(env, uid);
+        await rebuildCustomButtonsCache(env);
+        await tgSendMessage(env, chat_id, `✅ دکمه افزوده شد: <b>${htmlEscape(title)}</b> — قیمت: <b>${fmtNum(meta.price)}</b> ${CONFIG.DEFAULT_CURRENCY}`, mainMenuInlineKb());
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_price_change' && state?.id) {
+        const id = state.id;
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        const price = Number(text.replace(/[^0-9]/g, ''));
+        if (m) { m.price = price >= 0 ? price : 0; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
+        await clearUserState(env, uid);
+        await rebuildCustomButtonsCache(env);
+        await tgSendMessage(env, chat_id, '✅ قیمت بروزرسانی شد.', mainMenuInlineKb());
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit_change' && state?.id) {
+        const id = state.id;
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        const maxUsers = Number(String(text||'').replace(/[^0-9]/g, ''));
+        if (m) { m.max_users = maxUsers >= 0 ? maxUsers : 0; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
+        await clearUserState(env, uid);
+        await tgSendMessage(env, chat_id, '✅ محدودیت بروزرسانی شد.', mainMenuInlineKb());
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_replace_wait' && state?.id) {
+        const id = state.id;
+        let tmp = null;
+        if (msg && msg.document) {
+          tmp = { kind: 'document', file_id: msg.document.file_id, file_name: msg.document.file_name || 'file', file_size: msg.document.file_size || 0, mime_type: msg.document.mime_type || 'application/octet-stream' };
+        } else if (msg && msg.photo && msg.photo.length) {
+          const largest = msg.photo[msg.photo.length - 1];
+          tmp = { kind: 'photo', file_id: largest.file_id, file_name: 'photo', file_size: largest.file_size || 0, mime_type: 'image/jpeg' };
+        } else if (msg && msg.video) {
+          tmp = { kind: 'video', file_id: msg.video.file_id, file_name: msg.video.file_name || 'video', file_size: msg.video.file_size || 0, mime_type: msg.video.mime_type || 'video/mp4' };
+        } else if (msg && msg.audio) {
+          tmp = { kind: 'audio', file_id: msg.audio.file_id, file_name: msg.audio.file_name || 'audio', file_size: msg.audio.file_size || 0, mime_type: msg.audio.mime_type || 'audio/mpeg' };
+        } else if (text) {
+          tmp = { kind: 'text', text: String(text || '') };
+        }
+        if (!tmp) { await tgSendMessage(env, chat_id, '❌ نوع محتوا پشتیبانی نمی‌شود. دوباره تلاش کنید:'); return; }
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (!m) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ دکمه یافت نشد.'); return; }
+        // Replace only content-related fields
+        m.kind = tmp.kind;
+        if (tmp.kind === 'text') {
+          m.text = tmp.text || '';
+          m.file_id = undefined; m.file_name = undefined; m.file_size = undefined; m.mime_type = undefined;
+        } else {
+          m.file_id = tmp.file_id; m.file_name = tmp.file_name; m.file_size = tmp.file_size; m.mime_type = tmp.mime_type;
+          m.text = undefined;
+        }
+        await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m);
+        await clearUserState(env, uid);
+        await rebuildCustomButtonsCache(env);
+        await tgSendMessage(env, chat_id, '✅ محتوا جایگزین شد.', mainMenuInlineKb());
         return;
       }
       if (isAdminUser(env, uid) && state?.step === 'adm_upload_limit') {
@@ -1613,15 +1859,49 @@ async function onCallback(cb, env) {
     }
 
     if (data === 'back_main') {
+      if (!Array.isArray(env.__cbtnRowsCache)) { try { await rebuildCustomButtonsCache(env); } catch {} }
       const hdr = await mainMenuHeader(env);
       await tgEditMessage(env, chat_id, mid, hdr, mainMenuKb(env, uid));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
 
-    if (data === 'redeem_token') {
-      await setUserState(env, uid, { step: 'redeem_token_wait' });
-      await tgSendMessage(env, chat_id, '🔑 لطفاً توکن ۶ کاراکتری فایل را ارسال کنید:');
+    // Custom purchasable buttons — user flow
+    if (data.startsWith('cbtn:')) {
+      const id = data.split(':')[1];
+      const meta = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+      if (!meta || meta.disabled) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id); return; }
+      const price = Number(meta.price || 0);
+      const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
+      const already = paidUsers.includes(String(uid));
+      if (price > 0 && !already) {
+        const kbBuy = kb([[{ text: `✅ تایید (کسر ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY})`, callback_data: 'cbtn_confirm:'+id }],[{ text: '❌ انصراف', callback_data: 'cbtn_cancel' }]]);
+        await tgSendMessage(env, chat_id, `این مورد برای دریافت به <b>${fmtNum(price)}</b> ${CONFIG.DEFAULT_CURRENCY} نیاز دارد. آیا مایل به ادامه هستید؟`, kbBuy);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      const ok = await deliverCustomButtonToUser(env, uid, chat_id, id);
+      if (ok) await tgAnswerCallbackQuery(env, cb.id, 'ارسال شد');
+      return;
+    }
+    if (data.startsWith('cbtn_confirm:')) {
+      const id = data.split(':')[1];
+      const ok = await deliverCustomButtonToUser(env, uid, chat_id, id);
+      await tgAnswerCallbackQuery(env, cb.id, ok ? '✅' : '❌');
+      try { await tgEditReplyMarkup(env, chat_id, mid, { inline_keyboard: [] }); } catch {}
+      return;
+    }
+    if (data === 'cbtn_cancel') {
+      await tgAnswerCallbackQuery(env, cb.id, 'لغو شد');
+      try { await tgEditReplyMarkup(env, chat_id, mid, { inline_keyboard: [] }); } catch {}
+      return;
+    }
+
+    // Removed: redeem_token menu button
+
+    if (data === 'market') {
+      if (!Array.isArray(env.__cbtnRowsCache)) { try { await rebuildCustomButtonsCache(env); } catch {} }
+      await tgSendMessage(env, chat_id, '💰 بازارچه — یکی از گزینه‌ها را انتخاب کنید:', marketplaceKb(env));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -1911,12 +2191,7 @@ async function onCallback(cb, env) {
       return;
     }
 
-    if (data === 'redeem_token') {
-      await setUserState(env, uid, { step: 'redeem_token_wait' });
-      await tgEditMessage(env, chat_id, mid, '🔑 لطفاً توکن دریافتی را ارسال کنید. /update برای لغو', {});
-      await tgAnswerCallbackQuery(env, cb.id);
-      return;
-    }
+    // Removed: redeem_token menu button
 
     if (data === 'buy_coins') {
       // لیست پلن‌ها
@@ -2141,6 +2416,108 @@ async function onCallback(cb, env) {
         const settings = await getSettings(env);
         await tgEditMessage(env, chat_id, mid, 'پنل مدیریت:', adminMenuKb(settings));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      // Admin: Custom buttons management
+      if (data === 'adm_cbtn') {
+        const s = await getSettings(env);
+        const ids = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
+        const rows = [];
+        for (const id of ids) {
+          const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+          if (!m) continue;
+          const status = m.disabled ? '⛔️' : '🟢';
+          rows.push([{ text: `${status} ${m.title}`, callback_data: 'adm_cbtn_toggle:'+id }, { text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+id }]);
+          rows.push([{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+id }]);
+          rows.push([{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+id }, { text: `👥 محدودیت: ${fmtNum(m.max_users||0)}`, callback_data: 'adm_cbtn_set_limit:'+id }]);
+        }
+        rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت دکمه‌های سفارشی قابل خرید', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_cbtn_add') {
+        await setUserState(env, uid, { step: 'adm_cbtn_wait_file' });
+        await tgEditMessage(env, chat_id, mid, '📥 محتوا را ارسال کنید (سند/عکس/ویدیو/صوت) یا متنی که باید فروخته شود را بنویسید:', {});
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_cbtn_toggle:')) {
+        const id = data.split(':')[1];
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (m) { m.disabled = !m.disabled; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
+        await rebuildCustomButtonsCache(env);
+        // refresh
+        const s = await getSettings(env);
+        const ids = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
+        const rows = [];
+        for (const bid of ids) {
+          const mm = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + bid);
+          if (!mm) continue;
+          const status = mm.disabled ? '⛔️' : '🟢';
+          rows.push([{ text: `${status} ${mm.title}`, callback_data: 'adm_cbtn_toggle:'+bid }, { text: '🗑', callback_data: 'adm_cbtn_del:'+bid }]);
+          rows.push([{ text: '💰 قیمت: '+fmtNum(mm.price), callback_data: 'adm_cbtn_set_price:'+bid }]);
+        }
+        rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت دکمه‌های سفارشی قابل خرید', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        return;
+      }
+      if (data.startsWith('adm_cbtn_del:')) {
+        const id = data.split(':')[1];
+        await kvDel(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        const s = await getSettings(env);
+        s.custom_buttons = (Array.isArray(s.custom_buttons) ? s.custom_buttons : []).filter(x => x !== id);
+        await setSettings(env, s);
+        await rebuildCustomButtonsCache(env);
+        // refresh
+        const ids = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
+        const rows = [];
+        for (const bid of ids) {
+          const mm = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + bid);
+          if (!mm) continue;
+          const status = mm.disabled ? '⛔️' : '🟢';
+          rows.push([{ text: `${status} ${mm.title}`, callback_data: 'adm_cbtn_toggle:'+bid }, { text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+bid }]);
+          rows.push([{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+bid }]);
+          rows.push([{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+bid }, { text: `👥 محدودیت: ${fmtNum(mm.max_users||0)}`, callback_data: 'adm_cbtn_set_limit:'+bid }]);
+        }
+        rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت دکمه‌های سفارشی قابل خرید', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
+        return;
+      }
+      if (data.startsWith('adm_cbtn_set_price:')) {
+        const id = data.split(':')[1];
+        await setUserState(env, uid, { step: 'adm_cbtn_price_change', id });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, '💰 قیمت جدید را ارسال کنید:');
+        return;
+      }
+      if (data.startsWith('adm_cbtn_set_limit:')) {
+        const id = data.split(':')[1];
+        await setUserState(env, uid, { step: 'adm_cbtn_limit_change', id });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, '👥 محدودیت تعداد دریافت‌کنندگان یکتا را ارسال کنید (برای بدون محدودیت 0 بفرستید):');
+        return;
+      }
+      if (data.startsWith('adm_cbtn_replace:')) {
+        const id = data.split(':')[1];
+        await setUserState(env, uid, { step: 'adm_cbtn_replace_wait', id });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, '♻️ محتوای جدید را ارسال کنید (می‌تواند متن یا یکی از انواع فایل باشد):');
+        return;
+      }
+      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_price_change' && state?.id) {
+        const id = state.id;
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        const price = Number(text.replace(/[^0-9]/g, ''));
+        if (m) { m.price = price >= 0 ? price : 0; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
+        await clearUserState(env, uid);
+        await rebuildCustomButtonsCache(env);
+        await tgSendMessage(env, chat_id, '✅ قیمت بروزرسانی شد.', mainMenuInlineKb());
         return;
       }
       if (data === 'adm_block') {
