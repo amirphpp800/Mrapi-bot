@@ -824,6 +824,7 @@ function getKnownUserButtons() {
     { label: '👤 حساب کاربری', data: 'account' },
     { label: '👥 زیرمجموعه‌گیری', data: 'referrals' },
     { label: '🎁 کد هدیه', data: 'giftcode' },
+    { label: '💰 بازارچه', data: 'market' },
     { label: '🪙 خرید سکه', data: 'buy_coins' },
     { label: '🎟 ثبت تیکت', data: 'ticket_new' },
     { label: '🔙 بازگشت', data: 'back_main' },
