@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.0',
+  BOT_VERSION: '2.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -806,8 +806,7 @@ function mainMenuKb(env, uid) {
   const rows = [
     [ { text: '👥 معرفی دوستان', callback_data: 'referrals' }, { text: '👤 حساب کاربری', callback_data: 'account' } ],
     [ { text: '🛡 دریافت سرور اختصاصی', callback_data: 'private_server' } ],
-    [ { text: '🎁 کد هدیه', callback_data: 'giftcode' } ],
-    [ { text: '💰 بازارچه', callback_data: 'market' } ],
+    [ { text: '🎁 کد هدیه', callback_data: 'giftcode' }, { text: '💰 بازارچه', callback_data: 'market' } ],
     [ { text: '🪙 خرید سکه', callback_data: 'buy_coins' } ],
   ];
   if (isAdminUser(env, uid)) {
@@ -1827,8 +1826,9 @@ async function onCallback(cb, env) {
       }
     } catch {}
 
-    // Mandatory join check (اجازه بده تایید/لغو خرید بدون بررسی مجدد انجام شود)
-    const joined = await ensureJoinedChannels(env, uid, chat_id);
+    // Mandatory join check (ادمین‌ها مستثنی هستند؛ همچنین تایید/لغو خرید)
+    const isAdm = isAdminUser(env, uid);
+    const joined = isAdm ? true : await ensureJoinedChannels(env, uid, chat_id);
     if (!joined && data !== 'join_check' && !data.startsWith('confirm_buy') && data !== 'cancel_buy') {
       await tgAnswerCallbackQuery(env, cb.id, 'ابتدا عضو کانال‌ها شوید');
       return;
@@ -2508,16 +2508,6 @@ async function onCallback(cb, env) {
         await setUserState(env, uid, { step: 'adm_cbtn_replace_wait', id });
         await tgAnswerCallbackQuery(env, cb.id);
         await tgSendMessage(env, chat_id, '♻️ محتوای جدید را ارسال کنید (می‌تواند متن یا یکی از انواع فایل باشد):');
-        return;
-      }
-      if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_price_change' && state?.id) {
-        const id = state.id;
-        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
-        const price = Number(text.replace(/[^0-9]/g, ''));
-        if (m) { m.price = price >= 0 ? price : 0; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
-        await clearUserState(env, uid);
-        await rebuildCustomButtonsCache(env);
-        await tgSendMessage(env, chat_id, '✅ قیمت بروزرسانی شد.', mainMenuInlineKb());
         return;
       }
       if (data === 'adm_block') {
