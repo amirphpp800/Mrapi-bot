@@ -717,13 +717,17 @@ async function rebuildCustomButtonsCache(env) {
       const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
       if (m && !m.disabled) items.push(m);
     }
-    // Layout: long labels single row, short labels two per row
+    // Layout: single or paired
     const rows = [];
     const shortBuf = [];
-    const isLong = (title) => String(title || '').length > 12; // heuristic
+    const isSingle = (it) => {
+      if (it && typeof it.wide === 'boolean') return it.wide === true;
+      const title = it?.title || '';
+      return String(title).length > 12; // fallback heuristic
+    };
     for (const it of items) {
       const btn = { text: String(it.title || '—'), callback_data: 'cbtn:' + it.id };
-      if (isLong(it.title)) {
+      if (isSingle(it)) {
         // flush short buffer first
         if (shortBuf.length === 1) rows.push([ shortBuf.pop() ]);
         if (shortBuf.length === 2) rows.push([ shortBuf.shift(), shortBuf.shift() ]);
@@ -2435,14 +2439,32 @@ async function onCallback(cb, env) {
         for (const id of ids) {
           const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
           if (!m) continue;
-          const status = m.disabled ? '⛔️' : '🟢';
-          rows.push([{ text: `${status} ${m.title}`, callback_data: 'adm_cbtn_toggle:'+id }, { text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+id }]);
-          rows.push([{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+id }]);
-          rows.push([{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+id }, { text: `👥 محدودیت: ${fmtNum(m.max_users||0)}`, callback_data: 'adm_cbtn_set_limit:'+id }]);
+          rows.push([{ text: m.title, callback_data: 'adm_cbtn_item:'+id }]);
         }
         rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
-        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت دکمه‌های سفارشی قابل خرید', kb(rows));
+        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت بازارچه — یک آیتم را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_cbtn_item:')) {
+        const id = data.split(':')[1];
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (!m) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        const status = m.disabled ? '⛔️ غیرفعال' : '🟢 فعال';
+        const info = `عنوان: ${htmlEscape(m.title)}\nوضعیت: ${status}\nقیمت: ${fmtNum(m.price)} ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: ${fmtNum(m.max_users||0)}`;
+        const rows = [
+          [{ text: m.disabled ? '✅ فعال‌سازی' : '⛔️ غیرفعال‌سازی', callback_data: 'adm_cbtn_toggle:'+id }],
+          [{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+id }],
+          [{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+id }],
+          [{ text: '👥 تغییر محدودیت', callback_data: 'adm_cbtn_set_limit:'+id }],
+          [{ text: m.wide ? '📏 حالت معمولی' : '📏 حالت عریض', callback_data: 'adm_cbtn_wide_toggle:'+id }],
+          [{ text: '⬆️ انتقال به بالا', callback_data: 'adm_cbtn_move:'+id+':up' }, { text: '⬇️ انتقال به پایین', callback_data: 'adm_cbtn_move:'+id+':down' }],
+          [{ text: '⏫ انتقال به ابتدا', callback_data: 'adm_cbtn_move:'+id+':top' }, { text: '⏬ انتقال به انتها', callback_data: 'adm_cbtn_move:'+id+':bottom' }],
+          [{ text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+id }],
+          [{ text: '🔙 بازگشت به فهرست', callback_data: 'adm_cbtn' }]
+        ];
+        await tgEditMessage(env, chat_id, mid, `مدیریت آیتم بازارچه\n\n${info}`, kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -2457,21 +2479,90 @@ async function onCallback(cb, env) {
         const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
         if (m) { m.disabled = !m.disabled; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
         await rebuildCustomButtonsCache(env);
-        // refresh
-        const s = await getSettings(env);
-        const ids = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
-        const rows = [];
-        for (const bid of ids) {
-          const mm = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + bid);
-          if (!mm) continue;
-          const status = mm.disabled ? '⛔️' : '🟢';
-          rows.push([{ text: `${status} ${mm.title}`, callback_data: 'adm_cbtn_toggle:'+bid }, { text: '🗑', callback_data: 'adm_cbtn_del:'+bid }]);
-          rows.push([{ text: '💰 قیمت: '+fmtNum(mm.price), callback_data: 'adm_cbtn_set_price:'+bid }]);
-        }
-        rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
-        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
-        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت دکمه‌های سفارشی قابل خرید', kb(rows));
+        // refresh item submenu
+        const mm = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (!mm) { await tgEditMessage(env, chat_id, mid, 'آیتم یافت نشد', kb([[{ text: '🔙 بازگشت', callback_data: 'adm_cbtn' }]])); return; }
+        const status = mm.disabled ? '⛔️ غیرفعال' : '🟢 فعال';
+        const info = `عنوان: ${htmlEscape(mm.title)}\nوضعیت: ${status}\nقیمت: ${fmtNum(mm.price)} ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: ${fmtNum(mm.max_users||0)}`;
+        const rows = [
+          [{ text: mm.disabled ? '✅ فعال‌سازی' : '⛔️ غیرفعال‌سازی', callback_data: 'adm_cbtn_toggle:'+id }],
+          [{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+id }],
+          [{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+id }],
+          [{ text: '👥 تغییر محدودیت', callback_data: 'adm_cbtn_set_limit:'+id }],
+          [{ text: mm.wide ? '📏 حالت معمولی' : '📏 حالت عریض', callback_data: 'adm_cbtn_wide_toggle:'+id }],
+          [{ text: '⬆️ انتقال به بالا', callback_data: 'adm_cbtn_move:'+id+':up' }, { text: '⬇️ انتقال به پایین', callback_data: 'adm_cbtn_move:'+id+':down' }],
+          [{ text: '⏫ انتقال به ابتدا', callback_data: 'adm_cbtn_move:'+id+':top' }, { text: '⏬ انتقال به انتها', callback_data: 'adm_cbtn_move:'+id+':bottom' }],
+          [{ text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+id }],
+          [{ text: '🔙 بازگشت به فهرست', callback_data: 'adm_cbtn' }]
+        ];
+        await tgEditMessage(env, chat_id, mid, `مدیریت آیتم بازارچه\n\n${info}`, kb(rows));
         await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        return;
+      }
+      if (data.startsWith('adm_cbtn_wide_toggle:')) {
+        const id = data.split(':')[1];
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (!m) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        m.wide = !m.wide;
+        await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m);
+        await rebuildCustomButtonsCache(env);
+        // refresh submenu
+        const mm = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        const status = mm.disabled ? '⛔️ غیرفعال' : '🟢 فعال';
+        const info = `عنوان: ${htmlEscape(mm.title)}\nوضعیت: ${status}\nقیمت: ${fmtNum(mm.price)} ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: ${fmtNum(mm.max_users||0)}`;
+        const rows = [
+          [{ text: mm.disabled ? '✅ فعال‌سازی' : '⛔️ غیرفعال‌سازی', callback_data: 'adm_cbtn_toggle:'+id }],
+          [{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+id }],
+          [{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+id }],
+          [{ text: '👥 تغییر محدودیت', callback_data: 'adm_cbtn_set_limit:'+id }],
+          [{ text: mm.wide ? '📏 حالت معمولی' : '📏 حالت عریض', callback_data: 'adm_cbtn_wide_toggle:'+id }],
+          [{ text: '⬆️ انتقال به بالا', callback_data: 'adm_cbtn_move:'+id+':up' }, { text: '⬇️ انتقال به پایین', callback_data: 'adm_cbtn_move:'+id+':down' }],
+          [{ text: '⏫ انتقال به ابتدا', callback_data: 'adm_cbtn_move:'+id+':top' }, { text: '⏬ انتقال به انتها', callback_data: 'adm_cbtn_move:'+id+':bottom' }],
+          [{ text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+id }],
+          [{ text: '🔙 بازگشت به فهرست', callback_data: 'adm_cbtn' }]
+        ];
+        await tgEditMessage(env, chat_id, mid, `مدیریت آیتم بازارچه\n\n${info}`, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
+        return;
+      }
+      if (data.startsWith('adm_cbtn_move:')) {
+        const parts = data.split(':');
+        const id = parts[1];
+        const dir = parts[2];
+        const s = await getSettings(env);
+        const list = Array.isArray(s.custom_buttons) ? s.custom_buttons.slice() : [];
+        const idx = list.indexOf(id);
+        if (idx === -1) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        // compute new index
+        let ni = idx;
+        if (dir === 'up' && idx > 0) ni = idx - 1;
+        if (dir === 'down' && idx < list.length - 1) ni = idx + 1;
+        if (dir === 'top') ni = 0;
+        if (dir === 'bottom') ni = list.length - 1;
+        if (ni !== idx) {
+          list.splice(idx, 1);
+          list.splice(ni, 0, id);
+          s.custom_buttons = list;
+          await setSettings(env, s);
+          await rebuildCustomButtonsCache(env);
+        }
+        // refresh submenu
+        const mm = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        const status = mm?.disabled ? '⛔️ غیرفعال' : '🟢 فعال';
+        const info = mm ? `عنوان: ${htmlEscape(mm.title)}\nوضعیت: ${status}\nقیمت: ${fmtNum(mm.price)} ${CONFIG.DEFAULT_CURRENCY}\nمحدودیت یکتا: ${fmtNum(mm.max_users||0)}` : 'آیتم یافت نشد';
+        const rows = mm ? [
+          [{ text: mm.disabled ? '✅ فعال‌سازی' : '⛔️ غیرفعال‌سازی', callback_data: 'adm_cbtn_toggle:'+id }],
+          [{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+id }],
+          [{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+id }],
+          [{ text: '👥 تغییر محدودیت', callback_data: 'adm_cbtn_set_limit:'+id }],
+          [{ text: mm.wide ? '📏 حالت معمولی' : '📏 حالت عریض', callback_data: 'adm_cbtn_wide_toggle:'+id }],
+          [{ text: '⬆️ انتقال به بالا', callback_data: 'adm_cbtn_move:'+id+':up' }, { text: '⬇️ انتقال به پایین', callback_data: 'adm_cbtn_move:'+id+':down' }],
+          [{ text: '⏫ انتقال به ابتدا', callback_data: 'adm_cbtn_move:'+id+':top' }, { text: '⏬ انتقال به انتها', callback_data: 'adm_cbtn_move:'+id+':bottom' }],
+          [{ text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+id }],
+          [{ text: '🔙 بازگشت به فهرست', callback_data: 'adm_cbtn' }]
+        ] : [[{ text: '🔙 بازگشت', callback_data: 'adm_cbtn' }]];
+        await tgEditMessage(env, chat_id, mid, `مدیریت آیتم بازارچه\n\n${info}`, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'جابجا شد');
         return;
       }
       if (data.startsWith('adm_cbtn_del:')) {
@@ -2481,20 +2572,17 @@ async function onCallback(cb, env) {
         s.custom_buttons = (Array.isArray(s.custom_buttons) ? s.custom_buttons : []).filter(x => x !== id);
         await setSettings(env, s);
         await rebuildCustomButtonsCache(env);
-        // refresh
+        // back to list
         const ids = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
         const rows = [];
         for (const bid of ids) {
           const mm = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + bid);
           if (!mm) continue;
-          const status = mm.disabled ? '⛔️' : '🟢';
-          rows.push([{ text: `${status} ${mm.title}`, callback_data: 'adm_cbtn_toggle:'+bid }, { text: '🗑 حذف', callback_data: 'adm_cbtn_del:'+bid }]);
-          rows.push([{ text: '♻️ جایگزینی محتوا', callback_data: 'adm_cbtn_replace:'+bid }]);
-          rows.push([{ text: '💰 تغییر قیمت', callback_data: 'adm_cbtn_set_price:'+bid }, { text: `👥 محدودیت: ${fmtNum(mm.max_users||0)}`, callback_data: 'adm_cbtn_set_limit:'+bid }]);
+          rows.push([{ text: mm.title, callback_data: 'adm_cbtn_item:'+bid }]);
         }
         rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
-        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت دکمه‌های سفارشی قابل خرید', kb(rows));
+        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت بازارچه — یک آیتم را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
         return;
       }
