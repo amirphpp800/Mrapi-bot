@@ -711,11 +711,25 @@ function buildCustomButtonsRowsCached(env) {
 async function rebuildCustomButtonsCache(env) {
   try {
     const s = await getSettings(env);
-    const ids = Array.isArray(s?.custom_buttons) ? s.custom_buttons : [];
-    const items = [];
-    for (const id of ids) {
-      const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
-      if (m && !m.disabled) items.push(m);
+    let ids = Array.isArray(s?.custom_buttons) ? s.custom_buttons : [];
+    // if market_sort is set to 'oldest' or 'newest', we ignore manual order and sort by created_at
+    let items = [];
+    if (s?.market_sort === 'oldest' || s?.market_sort === 'newest') {
+      // load all, then sort
+      const tmp = [];
+      for (const id of ids) {
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (m && !m.disabled) tmp.push(m);
+      }
+      tmp.sort((a, b) => (Number(a.created_at||0) - Number(b.created_at||0)));
+      if (s.market_sort === 'newest') tmp.reverse();
+      items = tmp;
+    } else {
+      // manual order by ids
+      for (const id of ids) {
+        const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+        if (m && !m.disabled) items.push(m);
+      }
     }
     // Layout: single or paired
     const rows = [];
@@ -751,6 +765,38 @@ function marketplaceKb(env) {
   const rows = buildCustomButtonsRowsCached(env).slice();
   rows.push([{ text: '🔙 بازگشت', callback_data: 'back_main' }]);
   return kb(rows);
+}
+
+function buildMarketplacePage(env, page = 1) {
+  const allRows = buildCustomButtonsRowsCached(env).slice();
+  // paginate by total buttons (not rows) with 12 buttons per page
+  const pages = [];
+  let curr = [];
+  let count = 0;
+  for (const row of allRows) {
+    const rowCount = Array.isArray(row) ? row.length : 0;
+    if (count + rowCount > 12 && curr.length) {
+      pages.push(curr); curr = []; count = 0;
+    }
+    curr.push(row); count += rowCount;
+  }
+  if (curr.length) pages.push(curr);
+  const total = Math.max(1, pages.length);
+  const p = Math.min(Math.max(1, Number(page||1)), total);
+  const rows = total ? pages[p-1] : [];
+  // footer nav
+  const nav = [];
+  if (total > 1) {
+    const prev = p > 1 ? p - 1 : total;
+    const next = p < total ? p + 1 : 1;
+    nav.push({ text: '◀️', callback_data: 'market:p:'+prev });
+    nav.push({ text: `📄 ${p}/${total}`, callback_data: 'noop' });
+    nav.push({ text: '▶️', callback_data: 'market:p:'+next });
+  }
+  const finalRows = rows.slice();
+  if (nav.length) finalRows.push(nav);
+  finalRows.push([{ text: '🔙 بازگشت', callback_data: 'back_main' }]);
+  return { reply_markup: { inline_keyboard: finalRows } };
 }
 
 // Get OVPN price from settings with fallback
@@ -1914,7 +1960,17 @@ async function onCallback(cb, env) {
 
     if (data === 'market') {
       if (!Array.isArray(env.__cbtnRowsCache)) { try { await rebuildCustomButtonsCache(env); } catch {} }
-      await tgSendMessage(env, chat_id, '💰 بازارچه — یکی از گزینه‌ها را انتخاب کنید:', marketplaceKb(env));
+      const pageKb = buildMarketplacePage(env, 1);
+      await tgSendMessage(env, chat_id, '💰 بازارچه — یکی از گزینه‌ها را انتخاب کنید:', pageKb);
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data.startsWith('market:p:')) {
+      const pg = Number((data.split(':')[2]||'1')) || 1;
+      const pageKb = buildMarketplacePage(env, pg);
+      try { await tgEditReplyMarkup(env, chat_id, mid, pageKb.reply_markup); } catch {
+        await tgSendMessage(env, chat_id, '💰 بازارچه — صفحه جدید:', pageKb);
+      }
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
@@ -2441,10 +2497,50 @@ async function onCallback(cb, env) {
           if (!m) continue;
           rows.push([{ text: m.title, callback_data: 'adm_cbtn_item:'+id }]);
         }
+        const sortLabel = s?.market_sort === 'oldest' ? 'قدیمی→جدید' : (s?.market_sort === 'newest' ? 'جدید→قدیمی' : 'دستی');
+        const mode = s?.market_sort ? s.market_sort : 'manual';
         rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
+        rows.push([
+          { text: `ترتیب: ${sortLabel}`, callback_data: 'noop' }
+        ]);
+        rows.push([
+          { text: `${mode==='oldest'?'✅ ':''}قدیمی→جدید`, callback_data: 'adm_cbtn_sort:oldest' },
+          { text: `${mode==='newest'?'✅ ':''}جدید→قدیمی`, callback_data: 'adm_cbtn_sort:newest' },
+          { text: `${mode==='manual'?'✅ ':''}دستی`, callback_data: 'adm_cbtn_sort:manual' },
+        ]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
         await tgEditMessage(env, chat_id, mid, '🧩 مدیریت بازارچه — یک آیتم را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_cbtn_sort:')) {
+        const mode = data.split(':')[1];
+        const s = await getSettings(env);
+        if (mode === 'oldest') s.market_sort = 'oldest';
+        else if (mode === 'newest') s.market_sort = 'newest';
+        else delete s.market_sort;
+        await setSettings(env, s);
+        await rebuildCustomButtonsCache(env);
+        // refresh list
+        const ids = Array.isArray(s.custom_buttons) ? s.custom_buttons : [];
+        const rows = [];
+        for (const id of ids) {
+          const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+          if (!m) continue;
+          rows.push([{ text: m.title, callback_data: 'adm_cbtn_item:'+id }]);
+        }
+        const sortLabel = s?.market_sort === 'oldest' ? 'قدیمی→جدید' : (s?.market_sort === 'newest' ? 'جدید→قدیمی' : 'دستی');
+        const mode2 = s?.market_sort ? s.market_sort : 'manual';
+        rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
+        rows.push([{ text: `ترتیب: ${sortLabel}`, callback_data: 'noop' }]);
+        rows.push([
+          { text: `${mode2==='oldest'?'✅ ':''}قدیمی→جدید`, callback_data: 'adm_cbtn_sort:oldest' },
+          { text: `${mode2==='newest'?'✅ ':''}جدید→قدیمی`, callback_data: 'adm_cbtn_sort:newest' },
+          { text: `${mode2==='manual'?'✅ ':''}دستی`, callback_data: 'adm_cbtn_sort:manual' },
+        ]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
+        await tgEditMessage(env, chat_id, mid, '🧩 مدیریت بازارچه — یک آیتم را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'بروزرسانی شد');
         return;
       }
       if (data.startsWith('adm_cbtn_item:')) {
