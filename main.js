@@ -1960,16 +1960,26 @@ async function onCallback(cb, env) {
 
     if (data === 'market') {
       if (!Array.isArray(env.__cbtnRowsCache)) { try { await rebuildCustomButtonsCache(env); } catch {} }
-      const pageKb = buildMarketplacePage(env, 1);
-      await tgSendMessage(env, chat_id, '💰 بازارچه — یکی از گزینه‌ها را انتخاب کنید:', pageKb);
+      const hasItems = (buildCustomButtonsRowsCached(env) || []).length > 0;
+      if (!hasItems) {
+        await tgSendMessage(env, chat_id, '🛒 بازارچه خالی است.', kb([[{ text: '🔙 بازگشت', callback_data: 'back_main' }]]));
+      } else {
+        const pageKb = buildMarketplacePage(env, 1);
+        await tgSendMessage(env, chat_id, '💰 بازارچه — یکی از گزینه‌ها را انتخاب کنید:', pageKb);
+      }
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
     if (data.startsWith('market:p:')) {
       const pg = Number((data.split(':')[2]||'1')) || 1;
-      const pageKb = buildMarketplacePage(env, pg);
-      try { await tgEditReplyMarkup(env, chat_id, mid, pageKb.reply_markup); } catch {
-        await tgSendMessage(env, chat_id, '💰 بازارچه — صفحه جدید:', pageKb);
+      const hasItems = (buildCustomButtonsRowsCached(env) || []).length > 0;
+      if (!hasItems) {
+        await tgSendMessage(env, chat_id, '🛒 بازارچه خالی است.', kb([[{ text: '🔙 بازگشت', callback_data: 'back_main' }]]));
+      } else {
+        const pageKb = buildMarketplacePage(env, pg);
+        try { await tgEditReplyMarkup(env, chat_id, mid, pageKb.reply_markup); } catch {
+          await tgSendMessage(env, chat_id, '💰 بازارچه — صفحه جدید:', pageKb);
+        }
       }
       await tgAnswerCallbackQuery(env, cb.id);
       return;
