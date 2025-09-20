@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.7',
+  BOT_VERSION: '3.8',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -76,6 +76,32 @@ const CONFIG = {
 
 // صفحات فانکشنز env: { BOT_KV }
 
+// WireGuard: group availability by country with capacity (max_users)
+function groupWgAvailabilityByCountry(list) {
+  const map = {};
+  for (const e of Array.isArray(list) ? list : []) {
+    const country = String(e.country || '').trim() || 'نامشخص';
+    const flag = e.flag || '🌐';
+    const max = Number(e.max_users || 0);
+    const used = Number(e.used_count || 0);
+    const hasCap = (max === 0) || (used < max);
+    if (!map[country]) map[country] = { count: 0, flag };
+    if (hasCap) map[country].count += 1;
+    if (!map[country].flag && flag) map[country].flag = flag;
+  }
+  return map;
+}
+
+// WireGuard: pick a random endpoint for a given country that has capacity
+function pickWgEndpointWithCapacity(list, country) {
+  const arr = (Array.isArray(list) ? list : []).map((e, i) => ({ ...e, __idx: i }))
+    .filter(e => String(e.country || '') === String(country || ''))
+    .filter(e => Number(e.max_users || 0) === 0 || Number(e.used_count || 0) < Number(e.max_users || 0));
+  if (!arr.length) return null;
+  const r = Math.floor(Math.random() * arr.length);
+  return arr[r];
+}
+
 // Simple Web Admin page for WireGuard Endpoints management
 function renderWgAdminPage(settings, notice = '') {
   try {
@@ -86,6 +112,7 @@ function renderWgAdminPage(settings, notice = '') {
          <td><code>${e.hostport || ''}</code></td>
          <td>${e.country || ''}</td>
          <td>${e.flag || ''}</td>
+         <td>${Number(e.used_count||0)} / ${Number(e.max_users||0) === 0 ? '∞' : Number(e.max_users||0)}</td>
          <td>
            <form method="post" style="margin:0;">
              <input type="hidden" name="action" value="del" />
@@ -136,13 +163,16 @@ function renderWgAdminPage(settings, notice = '') {
         <label style="flex:1 1 50%">کشور<br/><input name="country" placeholder="آمریکا" /></label>
         <label style="flex:1 1 50%">پرچم<br/><input name="flag" placeholder="🇺🇸" /></label>
       </div>
+      <div class="row">
+        <label style="flex:1 1 50%">حداکثر کاربران هر Endpoint (0=نامحدود)<br/><input name="max_users" placeholder="0" /></label>
+      </div>
       <p><button type="submit">ثبت</button></p>
     </form>
   </section>
   <section class="card">
     <h2 style="margin-top:0;">فهرست Endpoint ها</h2>
     <table>
-      <thead><tr><th>#</th><th>Host:Port</th><th>کشور</th><th>پرچم</th><th>اقدام</th></tr></thead>
+      <thead><tr><th>#</th><th>Host:Port</th><th>کشور</th><th>پرچم</th><th>استفاده/حداکثر</th><th>اقدام</th></tr></thead>
       <tbody>${rows || ''}</tbody>
     </table>
   </section>
@@ -1374,19 +1404,28 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
         return;
       }
-      // User: WireGuard — ask for filename and send .conf
-      if (state?.step === 'ps_wg_name' && typeof state?.ep_idx === 'number') {
+      // User: WireGuard — ask for filename and send .conf (by country, random endpoint)
+      if (state?.step === 'ps_wg_name' && (typeof state?.ep_idx === 'number' || state?.country)) {
         const name = String(text || '').trim();
         const valid = /^[A-Za-z0-9_]{1,12}$/.test(name);
         if (!valid) {
-          await tgSendMessage(env, chat_id, '❌ نام نامعتبر است. فقط حروف/اعداد/زیرخط و حداکثر ۱۲ کاراکتر. کاراکترهای غیرمجاز مانند - @ # $ مجاز نیستند. دوباره ارسال کنید:');
+          await tgSendMessage(env, chat_id, '❌ نام نامعتبر است\n✔️ فقط حروف/اعداد/زیرخط و حداکثر ۱۲ کاراکتر\n⛔️ کاراکترهای غیرمجاز مانند - @ # $ مجاز نیستند\nلطفاً دوباره ارسال کنید:');
           return;
         }
-        const idx = Number(state.ep_idx);
         const s = await getSettings(env);
         const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
-        if (!(idx >= 0 && idx < list.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ Endpoint نامعتبر.'); return; }
-        const ep = list[idx];
+        let ep = null;
+        let idx = -1;
+        if (state.country) {
+          const pick = pickWgEndpointWithCapacity(list, state.country);
+          if (!pick) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ در این لوکیشن ظرفیت آزاد موجود نیست.'); return; }
+          ep = pick;
+          idx = Number(pick.__idx);
+        } else {
+          idx = Number(state.ep_idx);
+          if (!(idx >= 0 && idx < list.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ Endpoint نامعتبر.'); return; }
+          ep = list[idx];
+        }
         const d = s.wg_defaults || {};
         const priv = generateWgPrivateKey();
         const lines = [];
@@ -1398,7 +1437,6 @@ async function onMessage(msg, env) {
         if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
         lines.push('');
         lines.push('[Peer]');
-        if (ep.server_pk) lines.push(`PublicKey = ${ep.server_pk}`);
         if (d.allowed_ips) lines.push(`AllowedIPs = ${d.allowed_ips}`);
         if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
           lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
@@ -1408,6 +1446,13 @@ async function onMessage(msg, env) {
         const filename = `${name}.conf`;
         const blob = new Blob([cfg], { type: 'text/plain' });
         await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
+        // increase usage counter if limited
+        if (idx >= 0) {
+          s.wg_endpoints[idx] = s.wg_endpoints[idx] || {};
+          const used = Number(s.wg_endpoints[idx].used_count || 0) + 1;
+          s.wg_endpoints[idx].used_count = used;
+          await setSettings(env, s);
+        }
         await clearUserState(env, uid);
         return;
       }
@@ -1873,6 +1918,82 @@ async function onMessage(msg, env) {
           await setSettings(env, s);
           await clearUserState(env, uid);
           await tgSendMessage(env, chat_id, '✅ قیمت ذخیره شد.', mainMenuInlineKb());
+          return;
+        }
+        // Admin: Basic settings — card number
+        if (state?.step === 'adm_card_number') {
+          const raw = String(text || '').trim();
+          const normalized = raw.replace(/[^0-9\s]/g, '');
+          if (!/^[0-9\s]{8,30}$/.test(normalized)) { await tgSendMessage(env, chat_id, '❌ شماره کارت نامعتبر است. فقط ارقام و فاصله مجاز است. دوباره ارسال کنید:'); return; }
+          const s = await getSettings(env);
+          s.card_info = s.card_info || {};
+          s.card_info.card_number = normalized;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, '✅ شماره کارت ذخیره شد.', mainMenuInlineKb());
+          return;
+        }
+        // Admin: Basic settings — card holder name
+        if (state?.step === 'adm_card_name') {
+          const name = String(text || '').trim();
+          if (!name || name.length < 2) { await tgSendMessage(env, chat_id, '❌ نام نامعتبر است. دوباره ارسال کنید:'); return; }
+          const s = await getSettings(env);
+          s.card_info = s.card_info || {};
+          s.card_info.holder_name = name;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, '✅ نام دارنده کارت ذخیره شد.', mainMenuInlineKb());
+          return;
+        }
+        // Admin: Plans — add
+        if (state?.step === 'adm_plan_add_coins') {
+          const coins = Number(String(text || '').replace(/[^0-9]/g, ''));
+          if (!coins || coins <= 0) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد مثبت ارسال کنید:'); return; }
+          await setUserState(env, uid, { step: 'adm_plan_add_price', coins });
+          await tgSendMessage(env, chat_id, 'برچسب قیمت پلن جدید را ارسال کنید (مثلاً ۱۵٬۰۰۰ تومان):');
+          return;
+        }
+        if (state?.step === 'adm_plan_add_price' && state?.coins) {
+          const price_label = String(text || '').trim();
+          if (!price_label) { await tgSendMessage(env, chat_id, '❌ برچسب نامعتبر است. دوباره ارسال کنید:'); return; }
+          const s = await getSettings(env);
+          const plans = Array.isArray(s?.plans) ? s.plans : [];
+          const id = 'p' + Date.now();
+          plans.push({ id, coins: Number(state.coins), price_label });
+          s.plans = plans;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, '✅ پلن افزوده شد.', mainMenuInlineKb());
+          return;
+        }
+        // Admin: Plans — edit coins
+        if (state?.step === 'adm_plan_edit_coins' && typeof state?.idx === 'number') {
+          const coins = Number(String(text || '').replace(/[^0-9]/g, ''));
+          if (!coins || coins <= 0) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد مثبت ارسال کنید:'); return; }
+          const s = await getSettings(env);
+          const plans = Array.isArray(s?.plans) ? s.plans : [];
+          const idx = Number(state.idx);
+          if (!(idx >= 0 && idx < plans.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ پلن نامعتبر.'); return; }
+          plans[idx].coins = coins;
+          s.plans = plans;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, '✅ تعداد سکه پلن بروزرسانی شد.', mainMenuInlineKb());
+          return;
+        }
+        // Admin: Plans — edit price label
+        if (state?.step === 'adm_plan_edit_price' && typeof state?.idx === 'number') {
+          const price_label = String(text || '').trim();
+          if (!price_label) { await tgSendMessage(env, chat_id, '❌ برچسب نامعتبر است. دوباره ارسال کنید:'); return; }
+          const s = await getSettings(env);
+          const plans = Array.isArray(s?.plans) ? s.plans : [];
+          const idx = Number(state.idx);
+          if (!(idx >= 0 && idx < plans.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ پلن نامعتبر.'); return; }
+          plans[idx].price_label = price_label;
+          s.plans = plans;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, '✅ برچسب قیمت پلن بروزرسانی شد.', mainMenuInlineKb());
           return;
         }
         // Admin: DNS add flow — addresses list
@@ -2483,26 +2604,33 @@ async function onCallback(cb, env) {
       const s = await getSettings(env);
       const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
       if (!list.length) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id, 'هیچ Endpoint وایرگاردی ثبت نشده است.'); return; }
+      const map = groupWgAvailabilityByCountry(list);
+      const countries = Object.keys(map);
+      if (!countries.length) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id, 'هیچ لوکیشنی در دسترس نیست.'); return; }
       const rows = [];
-      for (let i = 0; i < list.length; i++) {
-        const e = list[i];
-        const label = `${e.flag || '🌐'} ${e.country || ''} — ${e.hostport}`.trim();
-        rows.push([{ text: label, callback_data: `ps_wg_pick:${i}` }]);
+      for (let i = 0; i < countries.length; i += 2) {
+        const c1 = countries[i];
+        const c2 = countries[i+1];
+        const f1 = map[c1].flag || '🌐';
+        const n1 = map[c1].count || 0;
+        const row = [{ text: `${f1} ${c1} — ${fmtNum(n1)}`, callback_data: `ps_wg_loc:${c1}` }];
+        if (c2) {
+          const f2 = map[c2].flag || '🌐';
+          const n2 = map[c2].count || 0;
+          row.push({ text: `${f2} ${c2} — ${fmtNum(n2)}`, callback_data: `ps_wg_loc:${c2}` });
+        }
+        rows.push(row);
       }
       rows.push([{ text: '🔙 بازگشت', callback_data: 'private_server' }]);
-      await tgEditMessage(env, chat_id, mid, 'WireGuard — یک Endpoint را انتخاب کنید:', kb(rows));
+      await tgEditMessage(env, chat_id, mid, 'WireGuard — یک لوکیشن را انتخاب کنید:', kb(rows));
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
-    if (data.startsWith('ps_wg_pick:')) {
-      const idx = Number((data.split(':')[1] || '').trim());
-      const s = await getSettings(env);
-      const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
-      if (!(idx >= 0 && idx < list.length)) { await tgAnswerCallbackQuery(env, cb.id, 'ردیف نامعتبر'); return; }
-      // Ask for a filename (max 12 chars, allowed A-Z a-z 0-9 _)
-      await setUserState(env, uid, { step: 'ps_wg_name', ep_idx: idx });
+    if (data.startsWith('ps_wg_loc:')) {
+      const country = data.split(':').slice(1).join(':');
+      await setUserState(env, uid, { step: 'ps_wg_name', country });
       await tgAnswerCallbackQuery(env, cb.id);
-      await tgSendMessage(env, chat_id, 'نام فایل کانفیگ را وارد کنید (حداکثر ۱۲ کاراکتر). فقط حروف/اعداد/زیرخط مجاز هستند. کاراکترهای غیرمجاز: - @ # $ و ...');
+      await tgSendMessage(env, chat_id, '📝 لطفاً نام فایل کانفیگ را وارد کنید\n(حداکثر ۱۲ کاراکتر)\n✔️ فقط حروف/اعداد/زیرخط مجاز هستند\n⛔️ کاراکترهای غیرمجاز: - @ # $ و ...');
       return;
     }
     
@@ -2898,15 +3026,15 @@ async function onCallback(cb, env) {
           if (!m) continue;
           rows.push([{ text: m.title, callback_data: 'adm_cbtn_item:'+id }]);
         }
-        const sortLabel = s?.market_sort === 'oldest' ? 'قدیمی→جدید' : (s?.market_sort === 'newest' ? 'جدید→قدیمی' : 'دستی');
+        const sortLabel = s?.market_sort === 'oldest' ? 'قدیم به جدید' : (s?.market_sort === 'newest' ? 'جدید به قدیم' : 'دستی');
         const mode = s?.market_sort ? s.market_sort : 'manual';
         rows.push([{ text: '➕ افزودن دکمه', callback_data: 'adm_cbtn_add' }]);
         rows.push([
           { text: `ترتیب: ${sortLabel}`, callback_data: 'noop' }
         ]);
         rows.push([
-          { text: `${mode==='oldest'?'✅ ':''}قدیمی→جدید`, callback_data: 'adm_cbtn_sort:oldest' },
-          { text: `${mode==='newest'?'✅ ':''}جدید→قدیمی`, callback_data: 'adm_cbtn_sort:newest' },
+          { text: `${mode==='oldest'?'✅ ':''}قدیم به جدید`, callback_data: 'adm_cbtn_sort:oldest' },
+          { text: `${mode==='newest'?'✅ ':''}جدید به قدیم`, callback_data: 'adm_cbtn_sort:newest' },
           { text: `${mode==='manual'?'✅ ':''}دستی`, callback_data: 'adm_cbtn_sort:manual' },
         ]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'admin' }]);
@@ -3149,6 +3277,119 @@ async function onCallback(cb, env) {
         ];
         await tgEditMessage(env, chat_id, mid, 'پیشرفته سازی سرویس — یکی را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      // --- Basic settings submenu ---
+      if (data === 'adm_basic') {
+        const s = await getSettings(env);
+        const cn = s?.card_info?.card_number ? `**** ${String(s.card_info.card_number).slice(-4)}` : '—';
+        const hn = s?.card_info?.holder_name || '—';
+        const plans = Array.isArray(s?.plans) && s.plans.length ? s.plans : CONFIG.PLANS;
+        const rows = [
+          [{ text: '🆔 آیدی پشتیبانی', callback_data: 'adm_support' }],
+          [{ text: `شماره کارت: ${cn}`, callback_data: 'adm_card_number' }],
+          [{ text: `نام دارنده: ${hn}`, callback_data: 'adm_card_name' }],
+          [{ text: `پلن‌های خرید سکه (${plans.length})`, callback_data: 'adm_plans' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_service' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, 'تنظیمات پایه ربات — یک مورد را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_support') {
+        const s = await getSettings(env);
+        const cur = s?.support_url || '';
+        await setUserState(env, uid, { step: 'adm_support_url' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, `آیدی یا لینک پشتیبانی فعلی: ${cur || '—'}\nنمونه مجاز: @YourSupport یا https://t.me/YourSupport\nمقدار جدید را ارسال کنید:`);
+        return;
+      }
+      // --- Card info and plans management ---
+      if (data === 'adm_card_number') {
+        await setUserState(env, uid, { step: 'adm_card_number' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'شماره کارت را ارسال کنید. فقط ارقام و فاصله مجاز است (مثال: 6219 8619 4308 4037)');
+        return;
+      }
+      if (data === 'adm_card_name') {
+        await setUserState(env, uid, { step: 'adm_card_name' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'نام دارنده کارت را ارسال کنید (مثال: علی رضایی)');
+        return;
+      }
+      if (data === 'adm_plans') {
+        const s = await getSettings(env);
+        const plans = Array.isArray(s?.plans) && s.plans.length ? s.plans : CONFIG.PLANS;
+        const rows = [];
+        for (let i = 0; i < plans.length; i++) {
+          const p = plans[i];
+          rows.push([
+            { text: `${i + 1}) ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} — ${p.price_label}`, callback_data: `adm_plan_edit:${i}` },
+            { text: '🗑 حذف', callback_data: `adm_plan_del:${i}` }
+          ]);
+        }
+        rows.push([{ text: '➕ افزودن پلن', callback_data: 'adm_plan_add' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_basic' }]);
+        rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+        await tgEditMessage(env, chat_id, mid, 'مدیریت پلن‌های سکه:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_plan_add') {
+        await setUserState(env, uid, { step: 'adm_plan_add_coins' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'تعداد سکه پلن جدید را ارسال کنید (فقط عدد):');
+        return;
+      }
+      if (data.startsWith('adm_plan_edit:')) {
+        const idx = Number((data.split(':')[1] || '').trim());
+        await tgAnswerCallbackQuery(env, cb.id);
+        const rows = [
+          [{ text: '✏️ ویرایش تعداد سکه', callback_data: `adm_plan_edit_coins:${idx}` }],
+          [{ text: '✏️ ویرایش برچسب قیمت', callback_data: `adm_plan_edit_price:${idx}` }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_plans' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, `ویرایش پلن #${idx + 1}`, kb(rows));
+        return;
+      }
+      if (data.startsWith('adm_plan_edit_coins:')) {
+        const idx = Number((data.split(':')[1] || '').trim());
+        await setUserState(env, uid, { step: 'adm_plan_edit_coins', idx });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'تعداد سکه جدید را ارسال کنید (فقط عدد):');
+        return;
+      }
+      if (data.startsWith('adm_plan_edit_price:')) {
+        const idx = Number((data.split(':')[1] || '').trim());
+        await setUserState(env, uid, { step: 'adm_plan_edit_price', idx });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'برچسب قیمت جدید را ارسال کنید (مثلاً ۱۵٬۰۰۰ تومان):');
+        return;
+      }
+      if (data.startsWith('adm_plan_del:')) {
+        const idx = Number((data.split(':')[1] || '').trim());
+        const s = await getSettings(env);
+        const plans = Array.isArray(s?.plans) ? s.plans : (CONFIG.PLANS || []);
+        if (idx >= 0 && idx < plans.length) {
+          plans.splice(idx, 1);
+          s.plans = plans;
+          await setSettings(env, s);
+        }
+        // Refresh list
+        const rows = [];
+        for (let i = 0; i < plans.length; i++) {
+          const p = plans[i];
+          rows.push([
+            { text: `${i + 1}) ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} — ${p.price_label}`, callback_data: `adm_plan_edit:${i}` },
+            { text: '🗑 حذف', callback_data: `adm_plan_del:${i}` }
+          ]);
+        }
+        rows.push([{ text: '➕ افزودن پلن', callback_data: 'adm_plan_add' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_basic' }]);
+        rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+        await tgEditMessage(env, chat_id, mid, 'مدیریت پلن‌های سکه:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
         return;
       }
       if (data === 'adm_prices') {
@@ -4382,9 +4623,9 @@ async function routerFetch(request, env, ctx) {
               const lines = String(formData.get('hostports') || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
               const country = String(formData.get('country') || '').trim();
               const flag = String(formData.get('flag') || '🌐').trim() || '🌐';
-              const server_pk = String(formData.get('server_pk') || '').trim();
+              const max_users = Number(String(formData.get('max_users') || '0').replace(/[^0-9]/g, '')) || 0;
               for (const hp of lines) {
-                s.wg_endpoints.push({ hostport: hp, country, flag, server_pk });
+                s.wg_endpoints.push({ hostport: hp, country, flag, used_count: 0, max_users });
               }
               await setSettings(env, s);
               return new Response(renderWgAdminPage(s, 'افزوده شد'), { headers: { 'content-type': 'text/html; charset=utf-8' } });
