@@ -4429,6 +4429,13 @@ function renderStatusPage(settings, stats, envSummary = {}) {
   .ok{ background:rgba(52,211,153,0.15); color:#34d399; }
   .bad{ background:rgba(248,113,113,0.15); color:#f87171; }
   .warn{ background:rgba(251,191,36,0.15); color:#fbbf24; }
+  .wg-admin-card form{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .wg-admin-card input[type="password"]{ flex:1; min-width:180px; padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.06); color:#fff; }
+  .wg-admin-card button{ padding:6px 12px; border-radius:8px; border:0; background:#3b82f6; color:#fff; cursor:pointer; }
+  @media (max-width: 480px){
+    .wg-admin-card input[type="password"]{ width:100%; flex: 1 1 100%; }
+    .wg-admin-card button{ width:100%; }
+  }
 </style>
 </head>
 <body>
@@ -4462,11 +4469,11 @@ function renderStatusPage(settings, stats, envSummary = {}) {
         <div style="margin-bottom:6px; font-weight:600;">تعداد فایل‌ها</div>
         <div>${files.toLocaleString('fa-IR')}</div>
       </div>
-      <div class="card stat">
+      <div class="card stat wg-admin-card">
         <div style="margin-bottom:10px; font-weight:600;">مدیریت Endpoint های WireGuard</div>
-        <form method="GET" action="/admin/wg" style="display:flex; gap:8px; align-items:center;">
-          <input name="key" type="password" placeholder="ADMIN_WEB_KEY" style="flex:1; padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.06); color:#fff;" />
-          <button type="submit" style="padding:6px 12px; border-radius:8px; border:0; background:#3b82f6; color:#fff; cursor:pointer;">بازکردن</button>
+        <form method="GET" action="/admin/wg">
+          <input name="key" type="password" placeholder="ADMIN_WEB_KEY" />
+          <button type="submit">بازکردن</button>
         </form>
         <div style="margin-top:6px; color:var(--sub); font-size:12px;">کلید وب ادمین را وارد کنید تا به صفحه مدیریت Endpoint منتقل شوید.</div>
       </div>
