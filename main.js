@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.5',
+  BOT_VERSION: '3.6',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -75,6 +75,37 @@ const CONFIG = {
 };
 
 // صفحات فانکشنز env: { BOT_KV }
+
+// Build a paginated keyboard for deleting unassigned DNS IPs in a country
+async function buildDnsDeleteListKb(env, version, country, page = 1) {
+  const prefix = dnsPrefix(version);
+  const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+  const ips = [];
+  for (const k of list.keys) {
+    const v = await kvGet(env, k.name);
+    if (v && !v.assigned_to && String(v.country || '') === String(country || '')) ips.push(v.ip);
+  }
+  ips.sort();
+  const per = 8;
+  const totalPages = Math.max(1, Math.ceil(ips.length / per));
+  const p = Math.min(Math.max(1, Number(page || 1)), totalPages);
+  const start = (p - 1) * per;
+  const chunk = ips.slice(start, start + per);
+  const rows = chunk.map(ip => ([{ text: ip, callback_data: `adm_dns_del_ip:${version}:${ip}:${country}` }]));
+  // Nav
+  if (totalPages > 1) {
+    const prev = p > 1 ? p - 1 : totalPages;
+    const next = p < totalPages ? p + 1 : 1;
+    rows.push([
+      { text: '◀️', callback_data: `adm_dns_list:${version}:${prev}:${country}` },
+      { text: `📄 ${p}/${totalPages}`, callback_data: 'noop' },
+      { text: '▶️', callback_data: `adm_dns_list:${version}:${next}:${country}` }
+    ]);
+  }
+  rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_dns_remove' }]);
+  rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+  return kb(rows);
+}
 
 // Deliver custom button content to user with payment check
 async function deliverCustomButtonToUser(env, uid, chat_id, id) {
@@ -785,6 +816,19 @@ function newToken(size = 26) {
   return t;
 }
 function htmlEscape(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+// WireGuard helpers: generate a valid-looking base64 private key (32 bytes)
+function bytesToBase64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  // btoa is available in CF Workers/JS runtime
+  return btoa(bin);
+}
+function generateWgPrivateKey() {
+  const buf = new Uint8Array(32);
+  crypto.getRandomValues(buf);
+  return bytesToBase64(buf);
+}
 
 // IP validators
 function isIPv4(ip) {
@@ -2321,8 +2365,29 @@ async function onCallback(cb, env) {
       return;
     }
     if (data === 'ps_wireguard') {
-      await sendWip(env, chat_id, 'سرویس وایرگارد');
+      const s = await getSettings(env);
+      const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
+      if (!list.length) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id, 'هیچ Endpoint وایرگاردی ثبت نشده است.'); return; }
+      const rows = [];
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i];
+        const label = `${e.flag || '🌐'} ${e.country || ''} — ${e.hostport}`.trim();
+        rows.push([{ text: label, callback_data: `ps_wg_pick:${i}` }]);
+      }
+      rows.push([{ text: '🔙 بازگشت', callback_data: 'private_server' }]);
+      await tgEditMessage(env, chat_id, mid, 'WireGuard — یک Endpoint را انتخاب کنید:', kb(rows));
       await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+    if (data.startsWith('ps_wg_pick:')) {
+      const idx = Number((data.split(':')[1] || '').trim());
+      const s = await getSettings(env);
+      const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
+      if (!(idx >= 0 && idx < list.length)) { await tgAnswerCallbackQuery(env, cb.id, 'ردیف نامعتبر'); return; }
+      // Ask for a filename (max 12 chars, allowed A-Z a-z 0-9 _)
+      await setUserState(env, uid, { step: 'ps_wg_name', ep_idx: idx });
+      await tgAnswerCallbackQuery(env, cb.id);
+      await tgSendMessage(env, chat_id, 'نام فایل کانفیگ را وارد کنید (حداکثر ۱۲ کاراکتر). فقط حروف/اعداد/زیرخط مجاز هستند. کاراکترهای غیرمجاز: - @ # $ و ...');
       return;
     }
     
@@ -3018,6 +3083,7 @@ async function onCallback(cb, env) {
           [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
           [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
           [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
+          [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
@@ -3068,32 +3134,8 @@ async function onCallback(cb, env) {
         // refresh
         const list = [];
         const rows = [
-          [{ text: '➕ افزودن Endpoint', callback_data: 'adm_wg_ep_add' }],
-          [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
-          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+          [{ text: '➕ افزودن Endpoint', callback_data: 'adm_wg_ep_add' }]
         ];
-        await tgEditMessage(env, chat_id, mid, 'مدیریت Endpoint های WireGuard:', kb(rows));
-        return;
-      }
-      if (data.startsWith('adm_wg_ep_del:')) {
-        const idx = Number((data.split(':')[1] || '').trim());
-        const s = await getSettings(env);
-        const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
-        if (idx >= 0 && idx < list.length) {
-          list.splice(idx, 1);
-          s.wg_endpoints = list;
-          await setSettings(env, s);
-          await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
-        } else {
-          await tgAnswerCallbackQuery(env, cb.id, 'ردیف نامعتبر');
-        }
-        // refresh
-        const rows = [];
-        for (let i = 0; i < list.length; i++) {
-          const e = list[i];
-          rows.push([{ text: `${i + 1}) ${e.flag || '🌐'} ${e.country || ''} — ${e.hostport}`, callback_data: `adm_wg_ep_del:${i}` }]);
-        }
-        rows.push([{ text: '➕ افزودن Endpoint', callback_data: 'adm_wg_ep_add' }]);
         if (list.length) rows.push([{ text: '🧹 پاکسازی همه', callback_data: 'adm_wg_ep_clear' }]);
         rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }]);
         rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
@@ -3152,23 +3194,30 @@ async function onCallback(cb, env) {
         const parts = data.split(':');
         const version = parts[1] === 'v6' ? 'v6' : 'v4';
         const country = parts.slice(2).join(':');
-        await setUserState(env, uid, { step: 'adm_dns_remove_confirm', version, country });
-        await tgEditMessage(env, chat_id, mid, `حذف آدرس‌های DNS نسخه ${version.toUpperCase()} برای کشور «${country}».\nفقط آی‌پی‌های اختصاص داده نشده حذف می‌شوند. تایید می‌کنید؟`, kb([
-          [{ text: '✅ تایید حذف', callback_data: 'adm_dns_remove_confirm' }],
-          [{ text: '❌ انصراف', callback_data: 'adm_dns_remove' }],
-        ]));
+        const page = 1;
+        await tgEditMessage(env, chat_id, mid, `حذف تکی آدرس‌های DNS (${version.toUpperCase()}) — ${country}\nروی هر آی‌پی برای حذف بزنید:`, await buildDnsDeleteListKb(env, version, country, page));
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
-      if (data === 'adm_dns_remove_confirm') {
-        const st = await getUserState(env, uid);
-        const version = st?.version === 'v6' ? 'v6' : 'v4';
-        const country = st?.country || '';
-        if (!country) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
-        const removed = await deleteDnsByCountry(env, version, country);
-        await clearUserState(env, uid);
-        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
-        await tgEditMessage(env, chat_id, mid, `✅ حذف انجام شد. تعداد حذف‌شده: ${fmtNum(removed)}`, kb([[{ text: '🔙 بازگشت', callback_data: 'adm_dns_remove' }]]));
+      if (data.startsWith('adm_dns_list:')) {
+        const m = data.split(':');
+        const version = m[1] === 'v6' ? 'v6' : 'v4';
+        const page = Number(m[2] || '1') || 1;
+        const country = m.slice(3).join(':');
+        await tgEditMessage(env, chat_id, mid, `حذف تکی آدرس‌های DNS (${version.toUpperCase()}) — ${country}\nروی هر آی‌پی برای حذف بزنید:`, await buildDnsDeleteListKb(env, version, country, page));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_dns_del_ip:')) {
+        const m = data.split(':');
+        const version = m[1] === 'v6' ? 'v6' : 'v4';
+        const ip = m[2];
+        const country = m.slice(3).join(':');
+        const key = dnsPrefix(version) + ip;
+        const v = await kvGet(env, key);
+        if (v && !v.assigned_to) { await kvDel(env, key); await tgAnswerCallbackQuery(env, cb.id, 'حذف شد'); }
+        else { await tgAnswerCallbackQuery(env, cb.id, 'ناممکن'); }
+        await tgEditMessage(env, chat_id, mid, `حذف تکی آدرس‌های DNS (${version.toUpperCase()}) — ${country}\nروی هر آی‌پی برای حذف بزنید:`, await buildDnsDeleteListKb(env, version, country, 1));
         return;
       }
       if (data === 'adm_dns_add_v4' || data === 'adm_dns_add_v6') {
@@ -4049,6 +4098,18 @@ async function getSettings(env) {
   if (!s.ovpn_flags || typeof s.ovpn_flags !== 'object') { s.ovpn_flags = CONFIG.OVPN_FLAGS; changed = true; }
   if (!s.card_info || typeof s.card_info !== 'object') { s.card_info = CONFIG.CARD_INFO; changed = true; }
   if (!s.support_url) { s.support_url = 'https://t.me/NeoDebug'; changed = true; }
+  // WireGuard defaults hydration
+  if (!s.wg_defaults || typeof s.wg_defaults !== 'object') {
+    s.wg_defaults = {
+      address: '10.66.66.2/32',
+      dns: '10.202.10.10, 10.202.10.11',
+      mtu: 1360,
+      listen_port: '',
+      allowed_ips: '0.0.0.0/11'
+    };
+    changed = true;
+  }
+  if (!Array.isArray(s.wg_endpoints)) { s.wg_endpoints = []; changed = true; }
   if (changed) { try { await setSettings(env, s); } catch {} }
   if (env) env.__settingsCache = s;
   return s;
