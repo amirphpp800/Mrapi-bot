@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.1',
+  BOT_VERSION: '3.5',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -813,14 +813,31 @@ function mainMenuInlineKb() {
   return kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]]);
 }
 
+// Get current support URL from settings
+async function getSupportUrl(env) {
+  try {
+    const s = await getSettings(env);
+    return s?.support_url || 'https://t.me/NeoDebug';
+  } catch { return 'https://t.me/NeoDebug'; }
+}
+
+// Build a keyboard with Support and Main Menu buttons using current settings
+async function supportInlineKb(env) {
+  const url = await getSupportUrl(env);
+  return kb([
+    [{ text: 'ارتباط با پشتیبانی', url }],
+    [{ text: '🏠 منوی اصلی', callback_data: 'back_main' }]
+  ]);
+}
+
 // Send a standard WIP (in development) message
 async function sendWip(env, chat_id, feature = 'این بخش') {
-  try { await tgSendMessage(env, chat_id, `🔧 ${feature} درحال توسعه است.`, mainMenuInlineKb()); } catch {}
+  try { await tgSendMessage(env, chat_id, `🔧 ${feature} درحال توسعه است.`, await supportInlineKb(env)); } catch {}
 }
 
 // Send a standard not-available message
 async function sendNotAvailable(env, chat_id, note = '❌ در حال حاضر موجود نیست.') {
-  try { await tgSendMessage(env, chat_id, note, mainMenuInlineKb()); } catch {}
+  try { await tgSendMessage(env, chat_id, note, await supportInlineKb(env)); } catch {}
 }
 
 // ------------------ Custom purchasable buttons helpers ------------------ //
@@ -926,6 +943,15 @@ async function getOvpnPrice(env) {
     if (s && s.ovpn_price_coins != null) return Number(s.ovpn_price_coins);
   } catch {}
   return Number(CONFIG.OVPN_PRICE_COINS || 5);
+}
+
+// Get DNS price from settings with fallback
+async function getDnsPrice(env) {
+  try {
+    const s = await getSettings(env);
+    if (s && s.dns_price_coins != null) return Number(s.dns_price_coins);
+  } catch {}
+  return Number(CONFIG.DNS_PRICE_COINS || 2);
 }
 
 // آیکون نوع فایل
@@ -1224,6 +1250,14 @@ async function onMessage(msg, env) {
         const url = s?.support_url || 'https://t.me/NeoDebug';
         const kbSupport = kb([[{ text: 'ارتباط با پشتیبانی', url }]]);
         await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
+        return;
+      }
+      if (data === 'adm_support') {
+        const s = await getSettings(env);
+        const cur = s?.support_url || '';
+        await setUserState(env, uid, { step: 'adm_support_url' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, `آیدی یا لینک پشتیبانی فعلی: ${cur || '—'}\nنمونه مجاز: @YourSupport یا https://t.me/YourSupport\nمقدار جدید را ارسال کنید:`);
         return;
       }
     } catch {}
@@ -1655,6 +1689,33 @@ async function onMessage(msg, env) {
       }
       // Admin flows
       if (isAdminUser(env, uid)) {
+        // Admin: change support URL/ID
+        if (state?.step === 'adm_support_url') {
+          let val = String(text || '').trim();
+          if (!val) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. دوباره ارسال کنید یا /update برای لغو.'); return; }
+          let url = '';
+          if (/^https?:\/\//i.test(val)) url = val;
+          else if (val.startsWith('@')) url = `https://t.me/${val.replace(/^@/, '')}`;
+          else url = `https://t.me/${val}`;
+          const s = await getSettings(env);
+          s.support_url = url;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `✅ آدرس پشتیبانی ثبت شد: ${url}`, mainMenuInlineKb());
+          return;
+        }
+        // Admin: set default prices (OpenVPN/DNS)
+        if (state?.step === 'adm_set_price' && state?.key) {
+          const amount = Number(String(text || '').replace(/[^0-9]/g, ''));
+          if (!amount && amount !== 0) { await tgSendMessage(env, chat_id, 'عدد نامعتبر است. یک مقدار عددی ارسال کنید:'); return; }
+          const s = await getSettings(env);
+          if (state.key === 'ovpn') s.ovpn_price_coins = amount;
+          if (state.key === 'dns') s.dns_price_coins = amount;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, '✅ قیمت ذخیره شد.', mainMenuInlineKb());
+          return;
+        }
         // Admin: DNS add flow — addresses list
         if (state?.step === 'adm_dns_add_addresses' && state?.version) {
           const version = state.version === 'v6' ? 'v6' : 'v4';
@@ -2268,9 +2329,10 @@ async function onCallback(cb, env) {
     if (data === 'ps_dns') {
       const v4 = await countAvailableDns(env, 'v4');
       const v6 = await countAvailableDns(env, 'v6');
+      const price = await getDnsPrice(env);
       const txt = [
         '🎛 سرویس دی‌ان‌اس خصوصی',
-        `قیمت هر دی‌ان‌اس: ${fmtNum(CONFIG.DNS_PRICE_COINS)} ${CONFIG.DEFAULT_CURRENCY}`,
+        `قیمت هر دی‌ان‌اس: ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY}`,
         `موجودی: IPv4 = ${fmtNum(v4)} | IPv6 = ${fmtNum(v6)}`,
         '',
         'نوع را انتخاب کنید:',
@@ -2312,7 +2374,7 @@ async function onCallback(cb, env) {
       const parts = data.split(':');
       const version = parts[1] === 'v6' ? 'v6' : 'v4';
       const country = parts.slice(2).join(':');
-      const price = Number(CONFIG.DNS_PRICE_COINS || 2);
+      const price = await getDnsPrice(env);
       const count = await countAvailableDnsByCountry(env, version, country);
       if (count <= 0) { await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id); return; }
       await setUserState(env, uid, { step: 'ps_dns_confirm', version, country, price });
@@ -2333,7 +2395,7 @@ async function onCallback(cb, env) {
       const st = await getUserState(env, uid);
       const version = st?.version === 'v6' ? 'v6' : 'v4';
       const country = st?.country || '';
-      const price = Number(st?.price || CONFIG.DNS_PRICE_COINS || 2);
+      const price = Number(st?.price || 0) || await getDnsPrice(env);
       if (!country) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
       const avail = await countAvailableDnsByCountry(env, version, country);
       if (avail <= 0) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'ناموجود'); await sendNotAvailable(env, chat_id); return; }
@@ -2884,7 +2946,10 @@ async function onCallback(cb, env) {
           [{ text: ` مدیریت دکمه‌های غیرفعال (${disabledCount})`, callback_data: 'adm_buttons' }],
           [{ text: '📥 آپلود اوپن وی پی ان', callback_data: 'adm_ovpn_upload' }],
           [{ text: `➕ افزودن آدرس DNS`, callback_data: 'adm_dns_add' }],
+          [{ text: '🗑 حذف آدرس‌های DNS', callback_data: 'adm_dns_remove' }],
           [{ text: `موجودی DNS — IPv4: ${fmtNum(v4)} | IPv6: ${fmtNum(v6)}`, callback_data: 'noop' }],
+          [{ text: '🆔 تنظیم آیدی پشتیبانی', callback_data: 'adm_support' }],
+          [{ text: '🧩 پیشرفته سازی', callback_data: 'adm_advanced' }],
           [{ text: ' بازگشت', callback_data: 'admin' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
@@ -2892,6 +2957,147 @@ async function onCallback(cb, env) {
         const kbSrv = kb(btns);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_advanced') {
+        const rows = [
+          [{ text: 'تنظیمات قیمت‌های پیش‌فرض', callback_data: 'adm_prices' }],
+          [{ text: 'تنظیمات WireGuard', callback_data: 'adm_wg_vars' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_service' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, 'پیشرفته سازی سرویس — یکی را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_prices') {
+        const op = await getOvpnPrice(env);
+        const dp = await getDnsPrice(env);
+        const rows = [
+          [{ text: '✏️ تغییر قیمت OpenVPN', callback_data: 'adm_price_set_ovpn' }],
+          [{ text: '✏️ تغییر قیمت DNS', callback_data: 'adm_price_set_dns' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_advanced' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        const txt = `تنظیم قیمت‌های پیش‌فرض\nOpenVPN: ${fmtNum(op)} ${CONFIG.DEFAULT_CURRENCY}\nDNS: ${fmtNum(dp)} ${CONFIG.DEFAULT_CURRENCY}`;
+        await tgEditMessage(env, chat_id, mid, txt, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_price_set_ovpn') {
+        await setUserState(env, uid, { step: 'adm_set_price', key: 'ovpn' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'مبلغ به سکه برای OpenVPN را وارد کنید (مثلاً 5):');
+        return;
+      }
+      if (data === 'adm_price_set_dns') {
+        await setUserState(env, uid, { step: 'adm_set_price', key: 'dns' });
+        await tgAnswerCallbackQuery(env, cb.id);
+        await tgSendMessage(env, chat_id, 'مبلغ به سکه برای DNS را وارد کنید (مثلاً 2):');
+        return;
+      }
+      if (data === 'adm_wg_vars') {
+        const s = await getSettings(env);
+        const epsCount = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints.length : 0;
+        const rows = [
+          [{ text: '✏️ ویرایش مقادیر پیش‌فرض', callback_data: 'adm_wg_defaults' }],
+          [{ text: `🛰 مدیریت Endpoint ها (${fmtNum(epsCount)})`, callback_data: 'adm_wg_eps' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_advanced' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, 'WireGuard — یک بخش را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_wg_defaults') {
+        const s = await getSettings(env);
+        const d = s.wg_defaults || {};
+        const rows = [
+          [{ text: `Address: ${d.address || '-'}`, callback_data: 'adm_wg_edit:address' }],
+          [{ text: `DNS: ${d.dns || '-'}`, callback_data: 'adm_wg_edit:dns' }],
+          [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
+          [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
+          [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, 'مقادیر پیش‌فرض WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_wg_edit:')) {
+        const field = data.split(':')[1];
+        await setUserState(env, uid, { step: 'adm_wg_edit', field });
+        let prompt = 'مقدار جدید را ارسال کنید:';
+        if (field === 'mtu') prompt = 'مقدار MTU را ارسال کنید (عدد) — مثال: 1360';
+        if (field === 'listen_port') prompt = 'ListenPort را ارسال کنید. برای حالت خودکار، پیام خالی یا 0 بفرستید.';
+        if (field === 'address') prompt = 'Address را ارسال کنید — مثال: 10.66.66.2/32';
+        if (field === 'dns') prompt = 'DNS را ارسال کنید — مثال: 10.202.10.10, 10.202.10.11';
+        if (field === 'allowed_ips') prompt = 'AllowedIPs را ارسال کنید — مثال: 0.0.0.0/11';
+        await tgSendMessage(env, chat_id, prompt);
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_wg_eps') {
+        const s = await getSettings(env);
+        const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
+        const rows = [];
+        for (let i = 0; i < list.length; i++) {
+          const e = list[i];
+          rows.push([{ text: `${i + 1}) ${e.flag || '🌐'} ${e.country || ''} — ${e.hostport}`, callback_data: `adm_wg_ep_del:${i}` }]);
+        }
+        rows.push([{ text: '➕ افزودن Endpoint', callback_data: 'adm_wg_ep_add' }]);
+        if (list.length) rows.push([{ text: '🧹 پاکسازی همه', callback_data: 'adm_wg_ep_clear' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }]);
+        rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+        await tgEditMessage(env, chat_id, mid, 'مدیریت Endpoint های WireGuard:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_wg_ep_add') {
+        await setUserState(env, uid, { step: 'adm_wg_ep_lines' });
+        await tgSendMessage(env, chat_id, 'لیست Endpoint ها را ارسال کنید (هر خط به صورت IP:PORT). سپس کشور و پرچم پرسیده می‌شود.');
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_wg_ep_clear') {
+        const s = await getSettings(env);
+        s.wg_endpoints = [];
+        await setSettings(env, s);
+        await tgAnswerCallbackQuery(env, cb.id, 'پاک شد');
+        // refresh
+        const list = [];
+        const rows = [
+          [{ text: '➕ افزودن Endpoint', callback_data: 'adm_wg_ep_add' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, 'مدیریت Endpoint های WireGuard:', kb(rows));
+        return;
+      }
+      if (data.startsWith('adm_wg_ep_del:')) {
+        const idx = Number((data.split(':')[1] || '').trim());
+        const s = await getSettings(env);
+        const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
+        if (idx >= 0 && idx < list.length) {
+          list.splice(idx, 1);
+          s.wg_endpoints = list;
+          await setSettings(env, s);
+          await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
+        } else {
+          await tgAnswerCallbackQuery(env, cb.id, 'ردیف نامعتبر');
+        }
+        // refresh
+        const rows = [];
+        for (let i = 0; i < list.length; i++) {
+          const e = list[i];
+          rows.push([{ text: `${i + 1}) ${e.flag || '🌐'} ${e.country || ''} — ${e.hostport}`, callback_data: `adm_wg_ep_del:${i}` }]);
+        }
+        rows.push([{ text: '➕ افزودن Endpoint', callback_data: 'adm_wg_ep_add' }]);
+        if (list.length) rows.push([{ text: '🧹 پاکسازی همه', callback_data: 'adm_wg_ep_clear' }]);
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }]);
+        rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+        await tgEditMessage(env, chat_id, mid, 'مدیریت Endpoint های WireGuard:', kb(rows));
         return;
       }
       if (data === 'adm_dns_add') {
@@ -2902,6 +3108,67 @@ async function onCallback(cb, env) {
         ];
         await tgEditMessage(env, chat_id, mid, '➕ افزودن آدرس DNS\nنوع را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_remove') {
+        const rows = [
+          [ { text: 'IPv4', callback_data: 'adm_dns_remove_v4' }, { text: 'IPv6', callback_data: 'adm_dns_remove_v6' } ],
+          [ { text: '🔙 بازگشت', callback_data: 'adm_service' } ],
+          [ { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' } ],
+        ];
+        await tgEditMessage(env, chat_id, mid, '🗑 حذف آدرس‌های DNS\nنوع را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_remove_v4' || data === 'adm_dns_remove_v6') {
+        const version = data.endsWith('_v4') ? 'v4' : 'v6';
+        const map = await groupDnsAvailabilityByCountry(env, version);
+        const countries = Object.keys(map);
+        if (!countries.length) {
+          await tgAnswerCallbackQuery(env, cb.id, 'لیستی وجود ندارد');
+          await tgEditMessage(env, chat_id, mid, 'هیچ آدرس DNS برای حذف وجود ندارد.', kb([[{ text: '🔙 بازگشت', callback_data: 'adm_dns_remove' }]]));
+          return;
+        }
+        const rows = [];
+        for (let i = 0; i < countries.length; i += 2) {
+          const c1 = countries[i];
+          const c2 = countries[i + 1];
+          const f1 = (map[c1]?.flag) || '🌐';
+          const n1 = map[c1]?.count || 0;
+          const row = [ { text: `${f1} ${c1} — ${fmtNum(n1)}`, callback_data: `adm_dns_remove_country:${version}:${c1}` } ];
+          if (c2) {
+            const f2 = (map[c2]?.flag) || '🌐';
+            const n2 = map[c2]?.count || 0;
+            row.push({ text: `${f2} ${c2} — ${fmtNum(n2)}`, callback_data: `adm_dns_remove_country:${version}:${c2}` });
+          }
+          rows.push(row);
+        }
+        rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_dns_remove' }]);
+        await tgEditMessage(env, chat_id, mid, `نسخه ${version.toUpperCase()} — کشور را برای حذف انتخاب کنید:`, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_dns_remove_country:')) {
+        const parts = data.split(':');
+        const version = parts[1] === 'v6' ? 'v6' : 'v4';
+        const country = parts.slice(2).join(':');
+        await setUserState(env, uid, { step: 'adm_dns_remove_confirm', version, country });
+        await tgEditMessage(env, chat_id, mid, `حذف آدرس‌های DNS نسخه ${version.toUpperCase()} برای کشور «${country}».\nفقط آی‌پی‌های اختصاص داده نشده حذف می‌شوند. تایید می‌کنید؟`, kb([
+          [{ text: '✅ تایید حذف', callback_data: 'adm_dns_remove_confirm' }],
+          [{ text: '❌ انصراف', callback_data: 'adm_dns_remove' }],
+        ]));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_remove_confirm') {
+        const st = await getUserState(env, uid);
+        const version = st?.version === 'v6' ? 'v6' : 'v4';
+        const country = st?.country || '';
+        if (!country) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        const removed = await deleteDnsByCountry(env, version, country);
+        await clearUserState(env, uid);
+        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
+        await tgEditMessage(env, chat_id, mid, `✅ حذف انجام شد. تعداد حذف‌شده: ${fmtNum(removed)}`, kb([[{ text: '🔙 بازگشت', callback_data: 'adm_dns_remove' }]]));
         return;
       }
       if (data === 'adm_dns_add_v4' || data === 'adm_dns_add_v6') {
@@ -3680,6 +3947,25 @@ async function unassignDns(env, version, ip) {
   } catch (e) { console.error('unassignDns error', e); return false; }
 }
 
+// Delete unassigned DNS IPs by version and country, return number removed
+async function deleteDnsByCountry(env, version, country) {
+  try {
+    const prefix = dnsPrefix(version);
+    const list = await env.BOT_KV.list({ prefix, limit: 1000 });
+    let removed = 0;
+    for (const k of list.keys) {
+      const key = k.name;
+      const v = await kvGet(env, key);
+      if (!v) continue;
+      if (v.assigned_to) continue;
+      if (String(v.country || '') !== String(country || '')) continue;
+      const ok = await kvDel(env, key);
+      if (ok) removed++;
+    }
+    return removed;
+  } catch (e) { console.error('deleteDnsByCountry error', e); return 0; }
+}
+
 // Group availability by country, preserving a representative flag
 async function groupDnsAvailabilityByCountry(env, version) {
   try {
@@ -3758,6 +4044,7 @@ async function getSettings(env) {
   // Hydrate dynamic defaults so settings persist across deploys
   let changed = false;
   if (typeof s.ovpn_price_coins === 'undefined') { s.ovpn_price_coins = CONFIG.OVPN_PRICE_COINS; changed = true; }
+  if (typeof s.dns_price_coins === 'undefined') { s.dns_price_coins = CONFIG.DNS_PRICE_COINS; changed = true; }
   if (!Array.isArray(s.ovpn_locations) || !s.ovpn_locations.length) { s.ovpn_locations = CONFIG.OVPN_LOCATIONS; changed = true; }
   if (!s.ovpn_flags || typeof s.ovpn_flags !== 'object') { s.ovpn_flags = CONFIG.OVPN_FLAGS; changed = true; }
   if (!s.card_info || typeof s.card_info !== 'object') { s.card_info = CONFIG.CARD_INFO; changed = true; }
