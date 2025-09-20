@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.6',
+  BOT_VERSION: '3.7',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -3108,18 +3108,18 @@ async function onCallback(cb, env) {
         const v4 = await countAvailableDns(env, 'v4');
         const v6 = await countAvailableDns(env, 'v6');
         const btns = [
-          [{ text: ` مدیریت دکمه‌های غیرفعال (${disabledCount})`, callback_data: 'adm_buttons' }],
-          [{ text: '📥 آپلود اوپن وی پی ان', callback_data: 'adm_ovpn_upload' }],
-          [{ text: `➕ افزودن آدرس DNS`, callback_data: 'adm_dns_add' }],
-          [{ text: '🗑 حذف آدرس‌های DNS', callback_data: 'adm_dns_remove' }],
-          [{ text: `موجودی DNS — IPv4: ${fmtNum(v4)} | IPv6: ${fmtNum(v6)}`, callback_data: 'noop' }],
-          [{ text: 'تنظیمات پایه ربات', callback_data: 'adm_basic' }],
-          [{ text: '🆔 تنظیم آیدی پشتیبانی', callback_data: 'adm_support' }],
-          [{ text: '🧩 پیشرفته سازی', callback_data: 'adm_advanced' }],
-          [{ text: ' بازگشت', callback_data: 'admin' }],
-          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+          // Row: Basic vs Advanced
+          [{ text: '⚙️ تنظیمات پایه ربات', callback_data: 'adm_basic' }, { text: '🧩 پیشرفته‌سازی', callback_data: 'adm_advanced' }],
+          // Row: Support + Disabled buttons
+          [{ text: '🆔 آیدی پشتیبانی', callback_data: 'adm_support' }, { text: `🚫 دکمه‌های غیرفعال (${disabledCount})`, callback_data: 'adm_buttons' }],
+          // Row: DNS management
+          [{ text: '➕ افزودن DNS', callback_data: 'adm_dns_add' }, { text: '🗑 حذف DNS', callback_data: 'adm_dns_remove' }],
+          // Row: OVPN upload (single action row)
+          [{ text: '📥 آپلود OVPN', callback_data: 'adm_ovpn_upload' }],
+          // Row: Back actions
+          [{ text: '🔙 بازگشت', callback_data: 'admin' }, { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
-        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nتعداد دکمه‌های غیرفعال: ${disabledCount}`;
+        const txt = ` تنظیمات سرویس\nوضعیت سرویس: ${enabled ? 'فعال' : 'غیرفعال'}\nموجودی DNS — IPv4: ${fmtNum(v4)} | IPv6: ${fmtNum(v6)}`;
         const kbSrv = kb(btns);
         await tgEditMessage(env, chat_id, mid, txt, kbSrv);
         await tgAnswerCallbackQuery(env, cb.id);
@@ -4461,6 +4461,14 @@ function renderStatusPage(settings, stats, envSummary = {}) {
       <div class="card stat">
         <div style="margin-bottom:6px; font-weight:600;">تعداد فایل‌ها</div>
         <div>${files.toLocaleString('fa-IR')}</div>
+      </div>
+      <div class="card stat">
+        <div style="margin-bottom:10px; font-weight:600;">مدیریت Endpoint های WireGuard</div>
+        <form method="GET" action="/admin/wg" style="display:flex; gap:8px; align-items:center;">
+          <input name="key" type="password" placeholder="ADMIN_WEB_KEY" style="flex:1; padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.06); color:#fff;" />
+          <button type="submit" style="padding:6px 12px; border-radius:8px; border:0; background:#3b82f6; color:#fff; cursor:pointer;">بازکردن</button>
+        </form>
+        <div style="margin-top:6px; color:var(--sub); font-size:12px;">کلید وب ادمین را وارد کنید تا به صفحه مدیریت Endpoint منتقل شوید.</div>
       </div>
     </div>
   </main>
