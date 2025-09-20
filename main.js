@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.9',
+  BOT_VERSION: '4.0',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -4536,6 +4536,17 @@ async function getSettings(env) {
     changed = true;
   }
   if (!Array.isArray(s.wg_endpoints)) { s.wg_endpoints = []; changed = true; }
+  else {
+    // Hydrate missing fields on existing endpoints
+    let mutated = false;
+    for (let i = 0; i < s.wg_endpoints.length; i++) {
+      const e = s.wg_endpoints[i] || {};
+      if (typeof e.used_count === 'undefined') { e.used_count = 0; mutated = true; }
+      if (typeof e.max_users === 'undefined') { e.max_users = 0; mutated = true; }
+      s.wg_endpoints[i] = e;
+    }
+    if (mutated) changed = true;
+  }
   if (changed) { try { await setSettings(env, s); } catch {} }
   if (env) env.__settingsCache = s;
   return s;
