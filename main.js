@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.8',
+  BOT_VERSION: '3.9',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -938,6 +938,17 @@ function generateWgPrivateKey() {
   return bytesToBase64(buf);
 }
 
+// Generate a valid random filename (<=12 chars, [A-Za-z0-9_])
+function genWgFilename() {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_';
+  let s = 'wg_';
+  const remain = 10 - s.length; // ensure total <= 12
+  for (let i = 0; i < remain; i++) {
+    s += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+  }
+  return s;
+}
+
 // IP validators
 function isIPv4(ip) {
   const m = String(ip || '').trim().match(/^(25[0-5]|2[0-4]\d|[01]?\d?\d)(\.(25[0-5]|2[0-4]\d|[01]?\d?\d)){3}$/);
@@ -1404,58 +1415,7 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
         return;
       }
-      // User: WireGuard — ask for filename and send .conf (by country, random endpoint)
-      if (state?.step === 'ps_wg_name' && (typeof state?.ep_idx === 'number' || state?.country)) {
-        const name = String(text || '').trim();
-        const valid = /^[A-Za-z0-9_]{1,12}$/.test(name);
-        if (!valid) {
-          await tgSendMessage(env, chat_id, '❌ نام نامعتبر است\n✔️ فقط حروف/اعداد/زیرخط و حداکثر ۱۲ کاراکتر\n⛔️ کاراکترهای غیرمجاز مانند - @ # $ مجاز نیستند\nلطفاً دوباره ارسال کنید:');
-          return;
-        }
-        const s = await getSettings(env);
-        const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
-        let ep = null;
-        let idx = -1;
-        if (state.country) {
-          const pick = pickWgEndpointWithCapacity(list, state.country);
-          if (!pick) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ در این لوکیشن ظرفیت آزاد موجود نیست.'); return; }
-          ep = pick;
-          idx = Number(pick.__idx);
-        } else {
-          idx = Number(state.ep_idx);
-          if (!(idx >= 0 && idx < list.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ Endpoint نامعتبر.'); return; }
-          ep = list[idx];
-        }
-        const d = s.wg_defaults || {};
-        const priv = generateWgPrivateKey();
-        const lines = [];
-        lines.push('[Interface]');
-        lines.push(`PrivateKey = ${priv}`);
-        if (d.address) lines.push(`Address = ${d.address}`);
-        if (d.dns) lines.push(`DNS = ${d.dns}`);
-        if (d.mtu) lines.push(`MTU = ${d.mtu}`);
-        if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
-        lines.push('');
-        lines.push('[Peer]');
-        if (d.allowed_ips) lines.push(`AllowedIPs = ${d.allowed_ips}`);
-        if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
-          lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
-        }
-        lines.push(`Endpoint = ${ep.hostport}`);
-        const cfg = lines.join('\n');
-        const filename = `${name}.conf`;
-        const blob = new Blob([cfg], { type: 'text/plain' });
-        await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
-        // increase usage counter if limited
-        if (idx >= 0) {
-          s.wg_endpoints[idx] = s.wg_endpoints[idx] || {};
-          const used = Number(s.wg_endpoints[idx].used_count || 0) + 1;
-          s.wg_endpoints[idx].used_count = used;
-          await setSettings(env, s);
-        }
-        await clearUserState(env, uid);
-        return;
-      }
+      // (moved WG filename handler below)
       if (data === 'adm_support') {
         const s = await getSettings(env);
         const cur = s?.support_url || '';
@@ -1481,6 +1441,56 @@ async function onMessage(msg, env) {
 
     // دستورات متنی
     const text = msg.text || msg.caption || '';
+    // User: WireGuard — ask for filename and send .conf (by country, random endpoint)
+    if (state?.step === 'ps_wg_name' && (typeof state?.ep_idx === 'number' || state?.country)) {
+      const name = String(text || '').trim();
+      const valid = /^[A-Za-z0-9_]{1,12}$/.test(name);
+      if (!valid) {
+        await tgSendMessage(env, chat_id, '❌ نام نامعتبر است\n✔️ فقط حروف/اعداد/زیرخط و حداکثر ۱۲ کاراکتر\n⛔️ کاراکترهای غیرمجاز مانند - @ # $ مجاز نیستند\nلطفاً دوباره ارسال کنید:');
+        return;
+      }
+      const s2 = await getSettings(env);
+      const list = Array.isArray(s2?.wg_endpoints) ? s2.wg_endpoints : [];
+      let ep = null;
+      let idx = -1;
+      if (state.country) {
+        const pick = pickWgEndpointWithCapacity(list, state.country);
+        if (!pick) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ در این لوکیشن ظرفیت آزاد موجود نیست.'); return; }
+        ep = pick; idx = Number(pick.__idx);
+      } else {
+        idx = Number(state.ep_idx);
+        if (!(idx >= 0 && idx < list.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ Endpoint نامعتبر.'); return; }
+        ep = list[idx];
+      }
+      const d = s2.wg_defaults || {};
+      const priv = generateWgPrivateKey();
+      const lines = [];
+      lines.push('[Interface]');
+      lines.push(`PrivateKey = ${priv}`);
+      if (d.address) lines.push(`Address = ${d.address}`);
+      if (d.dns) lines.push(`DNS = ${d.dns}`);
+      if (d.mtu) lines.push(`MTU = ${d.mtu}`);
+      if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
+      lines.push('');
+      lines.push('[Peer]');
+      if (d.allowed_ips) lines.push(`AllowedIPs = ${d.allowed_ips}`);
+      if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
+        lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
+      }
+      lines.push(`Endpoint = ${ep.hostport}`);
+      const cfg = lines.join('\n');
+      const filename = `${name}.conf`;
+      const blob = new Blob([cfg], { type: 'text/plain' });
+      await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
+      if (idx >= 0) {
+        s2.wg_endpoints[idx] = s2.wg_endpoints[idx] || {};
+        const used = Number(s2.wg_endpoints[idx].used_count || 0) + 1;
+        s2.wg_endpoints[idx].used_count = used;
+        await setSettings(env, s2);
+      }
+      await clearUserState(env, uid);
+      return;
+    }
     // Admin: /who <user_id>
     if (text.startsWith('/who')) {
       if (!isAdminUser(env, uid)) { await tgSendMessage(env, chat_id, 'این دستور فقط برای مدیران است.'); return; }
@@ -2630,7 +2640,60 @@ async function onCallback(cb, env) {
       const country = data.split(':').slice(1).join(':');
       await setUserState(env, uid, { step: 'ps_wg_name', country });
       await tgAnswerCallbackQuery(env, cb.id);
-      await tgSendMessage(env, chat_id, '📝 لطفاً نام فایل کانفیگ را وارد کنید\n(حداکثر ۱۲ کاراکتر)\n✔️ فقط حروف/اعداد/زیرخط مجاز هستند\n⛔️ کاراکترهای غیرمجاز: - @ # $ و ...');
+      const kbRand = kb([
+        [{ text: '🎲 نام تصادفی و ارسال', callback_data: 'ps_wg_rand' }],
+        [{ text: '🔙 بازگشت', callback_data: 'private_server' }]
+      ]);
+      await tgSendMessage(env, chat_id, '📝 لطفاً نام فایل کانفیگ را وارد کنید\n(حداکثر ۱۲ کاراکتر)\n✔️ فقط حروف/اعداد/زیرخط مجاز هستند\n⛔️ کاراکترهای غیرمجاز: - @ # $ و ...', kbRand);
+      return;
+    }
+    if (data === 'ps_wg_rand') {
+      const st = await getUserState(env, uid);
+      const name = genWgFilename();
+      const s2 = await getSettings(env);
+      const list = Array.isArray(s2?.wg_endpoints) ? s2.wg_endpoints : [];
+      let ep = null;
+      let idx = -1;
+      if (st?.country) {
+        const pick = pickWgEndpointWithCapacity(list, st.country);
+        if (!pick) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'ظرفیت ندارد'); await tgSendMessage(env, chat_id, '❌ در این لوکیشن ظرفیت آزاد موجود نیست.'); return; }
+        ep = pick; idx = Number(pick.__idx);
+      } else if (typeof st?.ep_idx === 'number') {
+        idx = Number(st.ep_idx);
+        if (!(idx >= 0 && idx < list.length)) { await clearUserState(env, uid); await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        ep = list[idx];
+      } else {
+        await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر');
+        return;
+      }
+      const d = s2.wg_defaults || {};
+      const priv = generateWgPrivateKey();
+      const lines = [];
+      lines.push('[Interface]');
+      lines.push(`PrivateKey = ${priv}`);
+      if (d.address) lines.push(`Address = ${d.address}`);
+      if (d.dns) lines.push(`DNS = ${d.dns}`);
+      if (d.mtu) lines.push(`MTU = ${d.mtu}`);
+      if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
+      lines.push('');
+      lines.push('[Peer]');
+      if (d.allowed_ips) lines.push(`AllowedIPs = ${d.allowed_ips}`);
+      if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
+        lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
+      }
+      lines.push(`Endpoint = ${ep.hostport}`);
+      const cfg = lines.join('\n');
+      const filename = `${name}.conf`;
+      const blob = new Blob([cfg], { type: 'text/plain' });
+      await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
+      if (idx >= 0) {
+        s2.wg_endpoints[idx] = s2.wg_endpoints[idx] || {};
+        const used = Number(s2.wg_endpoints[idx].used_count || 0) + 1;
+        s2.wg_endpoints[idx].used_count = used;
+        await setSettings(env, s2);
+      }
+      await clearUserState(env, uid);
+      await tgAnswerCallbackQuery(env, cb.id, 'ارسال شد');
       return;
     }
     
