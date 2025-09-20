@@ -1296,6 +1296,43 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '⛔️ دسترسی شما به ربات مسدود شده است. برای رفع مشکل با پشتیبانی تماس بگیرید.', kbSupport);
         return;
       }
+      // User: WireGuard — ask for filename and send .conf
+      if (state?.step === 'ps_wg_name' && typeof state?.ep_idx === 'number') {
+        const name = String(text || '').trim();
+        const valid = /^[A-Za-z0-9_]{1,12}$/.test(name);
+        if (!valid) {
+          await tgSendMessage(env, chat_id, '❌ نام نامعتبر است. فقط حروف/اعداد/زیرخط و حداکثر ۱۲ کاراکتر. کاراکترهای غیرمجاز مانند - @ # $ مجاز نیستند. دوباره ارسال کنید:');
+          return;
+        }
+        const idx = Number(state.ep_idx);
+        const s = await getSettings(env);
+        const list = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints : [];
+        if (!(idx >= 0 && idx < list.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ Endpoint نامعتبر.'); return; }
+        const ep = list[idx];
+        const d = s.wg_defaults || {};
+        const priv = generateWgPrivateKey();
+        const lines = [];
+        lines.push('[Interface]');
+        lines.push(`PrivateKey = ${priv}`);
+        if (d.address) lines.push(`Address = ${d.address}`);
+        if (d.dns) lines.push(`DNS = ${d.dns}`);
+        if (d.mtu) lines.push(`MTU = ${d.mtu}`);
+        if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
+        lines.push('');
+        lines.push('[Peer]');
+        if (ep.server_pk) lines.push(`PublicKey = ${ep.server_pk}`);
+        if (d.allowed_ips) lines.push(`AllowedIPs = ${d.allowed_ips}`);
+        if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
+          lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
+        }
+        lines.push(`Endpoint = ${ep.hostport}`);
+        const cfg = lines.join('\n');
+        const filename = `${name}.conf`;
+        const blob = new Blob([cfg], { type: 'text/plain' });
+        await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
+        await clearUserState(env, uid);
+        return;
+      }
       if (data === 'adm_support') {
         const s = await getSettings(env);
         const cur = s?.support_url || '';
@@ -3609,6 +3646,12 @@ async function onCallback(cb, env) {
           '🪙 خرید سکه — انتخاب پلن، مشاهده اطلاعات پرداخت و ارسال رسید',
           '',
           'ارسال فایل (Document) — ذخیره فایل و دریافت لینک (برای مدیران در بخش آپلود پیشرفته قابل قیمت‌گذاری/محدودسازی است)',
+          '',
+          'بخش‌های مدیریت مهم:',
+          '⚙️ تنظیمات سرویس — مدیریت دکمه‌های غیرفعال، آپلود OVPN، افزودن/حذف آدرس‌های DNS، تنظیم آیدی پشتیبانی',
+          '🧩 پیشرفته سازی — تنظیم قیمت‌های پیشفرض (DNS/OVPN) و تنظیمات WireGuard',
+          'WireGuard — ویرایش مقادیر پیشفرض (Address, DNS, MTU, ListenPort, AllowedIPs, PersistentKeepalive) و مدیریت Endpoint ها',
+          'حذف DNS — حذف تکی آی‌پی‌ها به تفکیک کشور و نسخه (IPv4/IPv6)',
         ];
         await tgEditMessage(env, chat_id, mid, lines.join('\n'), kb([[{ text: '🔙 بازگشت', callback_data: 'back_main' }]]));
         await tgAnswerCallbackQuery(env, cb.id);
