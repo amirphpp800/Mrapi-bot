@@ -19,7 +19,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '3.0',
+  BOT_VERSION: '3.1',
   DEFAULT_CURRENCY: 'سکه',
   SERVICE_TOGGLE_KEY: 'settings:service_enabled',
   BASE_STATS_KEY: 'stats:base',
@@ -188,6 +188,46 @@ ${content}`);
     console.error('deliverFileToUser error', e);
     await tgSendMessage(env, chat_id, 'خطا در ارسال فایل.');
     return false;
+  }
+}
+
+// Verify that the bot itself is admin in a given channel token
+// Returns { verifiable: boolean, isAdmin: boolean }
+async function checkBotAdminForToken(env, token) {
+  try {
+    let chat = '';
+    const t = String(token || '').trim();
+    if (!t) return { verifiable: false, isAdmin: false };
+    if (t.startsWith('http')) {
+      try {
+        const u = new URL(t);
+        const host = u.hostname.replace(/^www\./, '').toLowerCase();
+        const seg = (u.pathname || '').split('/').filter(Boolean)[0] || '';
+        if ((host === 't.me' || host === 'telegram.me') && seg && seg.toLowerCase() !== 'joinchat' && seg.toLowerCase() !== 'c') {
+          chat = '@' + seg;
+        } else {
+          // private/invite links are not verifiable via getChatMember
+          return { verifiable: false, isAdmin: false };
+        }
+      } catch {
+        return { verifiable: false, isAdmin: false };
+      }
+    } else if (t.startsWith('@') || /^-100/.test(t)) {
+      chat = t;
+    } else {
+      chat = '@' + t;
+    }
+    if (!chat) return { verifiable: false, isAdmin: false };
+    const me = await tgGetMe(env);
+    const botId = me?.result?.id;
+    if (!botId) return { verifiable: false, isAdmin: false };
+    const res = await tgGetChatMember(env, chat, botId);
+    const status = res?.result?.status || '';
+    const isAdmin = status === 'administrator' || status === 'creator';
+    return { verifiable: true, isAdmin };
+  } catch (e) {
+    console.error('checkBotAdminForToken error', e);
+    return { verifiable: false, isAdmin: false };
   }
 }
 
@@ -559,8 +599,32 @@ async function tgGetChatMember(env, chat_id, user_id) {
 function normalizeChannelToken(token) {
   const t = String(token || '').trim();
   if (!t) return '';
-  if (t.startsWith('http')) return t;
+  // Accept @username, -100123..., full t.me/telegram.me links (including invite links)
+  // Normalize as much as possible to a verifiable handle when public; otherwise keep URL
   if (t.startsWith('@') || t.startsWith('-100')) return t;
+  // Bare username without @
+  if (/^[A-Za-z0-9_]{5,}$/i.test(t)) return '@' + t;
+  // Full links
+  if (/^https?:\/\//i.test(t)) {
+    try {
+      const u = new URL(t);
+      const host = u.hostname.replace(/^www\./, '').toLowerCase();
+      const segs = (u.pathname || '').split('/').filter(Boolean);
+      // t.me/<username> or telegram.me/<username>
+      if ((host === 't.me' || host === 'telegram.me') && segs.length >= 1) {
+        const seg0 = segs[0];
+        // if joinchat or c/<id> or private invite, cannot verify — keep full URL for button only
+        if (seg0.toLowerCase() === 'joinchat' || seg0.toLowerCase() === 'addstickers' || seg0.toLowerCase() === 'c') {
+          return t;
+        }
+        // Otherwise treat as public username
+        return '@' + seg0;
+      }
+      return t; // unknown host — keep as-is
+    } catch {
+      return t;
+    }
+  }
   return '@' + t;
 }
 
@@ -573,7 +637,19 @@ async function buildJoinKb(env) {
     for (const chRaw of channels) {
       const ch = chRaw.trim();
       if (!ch) continue;
-      const url = ch.startsWith('http') ? ch : `https://t.me/${ch.replace(/^@/, '')}`;
+      // Build URL only when we can
+      let url = '';
+      if (ch.startsWith('http')) {
+        url = ch;
+      } else if (/^@/.test(ch)) {
+        url = `https://t.me/${ch.replace(/^@/, '')}`;
+      } else if (/^-100/.test(ch)) {
+        // numeric id has no public URL; skip creating a button for it
+        url = '';
+      } else {
+        url = `https://t.me/${ch}`;
+      }
+      if (!url) continue; // skip non-linkable entries
       // Hide channel usernames in label; link goes to channel URL
       rows.push([{ text: 'عضویت در کانال', url }]);
     }
@@ -582,6 +658,50 @@ async function buildJoinKb(env) {
   } catch {
     return { reply_markup: { inline_keyboard: [[{ text: '✅ بررسی عضویت', callback_data: 'join_check' }]] } };
   }
+}
+
+// -------- Admin: Join management UI helpers -------- //
+function admJoinManageKb(settings) {
+  const arr = Array.isArray(settings?.join_channels) ? settings.join_channels : [];
+  const rows = [];
+  // List channels with edit/delete controls (two per row when possible)
+  for (let i = 0; i < arr.length; i++) {
+    const idx = i;
+    const raw = String(arr[i] || '').trim();
+    let label = raw;
+    if (raw.startsWith('http')) {
+      try {
+        const u = new URL(raw);
+        const host = u.hostname.replace(/^www\./, '').toLowerCase();
+        const seg = (u.pathname || '').split('/').filter(Boolean)[0] || '';
+        if ((host === 't.me' || host === 'telegram.me') && seg && seg.toLowerCase() !== 'joinchat' && seg.toLowerCase() !== 'c') {
+          label = '@' + seg;
+        } else {
+          label = 'لینک دعوت/خصوصی (غیرقابل بررسی)';
+        }
+      } catch {
+        label = 'لینک دعوت/خصوصی (غیرقابل بررسی)';
+      }
+    } else if (/^-100/.test(raw)) {
+      label = `آیدی عددی: ${raw}`;
+    } else if (!raw.startsWith('@')) {
+      label = '@' + raw;
+    }
+    rows.push([
+      { text: `${i + 1}) ${label}`, callback_data: `adm_join_edit:${idx}` },
+      { text: '🗑 حذف', callback_data: `adm_join_del:${idx}` }
+    ]);
+  }
+  rows.push([{ text: '➕ افزودن کانال', callback_data: 'adm_join_add' }]);
+  if (arr.length) rows.push([{ text: '🧹 پاکسازی همه', callback_data: 'adm_join_clear' }]);
+  rows.push([{ text: '🔙 بازگشت', callback_data: 'back_main' }]);
+  return kb(rows);
+}
+
+function admJoinManageText(settings) {
+  const arr = Array.isArray(settings?.join_channels) ? settings.join_channels : [];
+  const list = arr.map((c, i) => `${i + 1}) ${c}`).join('\n');
+  return `تنظیم جویین اجباری\nکانال‌های فعلی:${arr.length ? '\n' + list : ' —'}\n\n- برای افزودن: دکمه «افزودن کانال» را بزنید.\n- برای ویرایش/حذف: روی هر ردیف بزنید.`;
 }
 
 async function ensureJoinedChannels(env, uid, chat_id, silent = false) {
@@ -1612,12 +1732,40 @@ async function onMessage(msg, env) {
             await tgSendMessage(env, chat_id, '❌ کانال نامعتبر است. نمونه: @channel یا لینک کامل');
             return;
           }
+          // Verify bot admin status for this channel
+          const chk = await checkBotAdminForToken(env, token);
+          if (!chk.verifiable) {
+            await tgSendMessage(env, chat_id, '⚠️ امکان بررسی این لینک وجود ندارد (احتمالاً لینک دعوت/خصوصی). لطفاً ربات را به کانال اضافه و ادمین کنید و سپس نام کاربری عمومی (@username) را ارسال کنید.');
+            return;
+          }
+          if (!chk.isAdmin) {
+            await tgSendMessage(env, chat_id, '❌ ربات در این کانال ادمین نیست. عملیات ناموفق بود. ابتدا ربات را ادمین کانال کنید سپس دوباره تلاش کنید.');
+            return;
+          }
           const s = await getSettings(env);
           const arr = Array.isArray(s.join_channels) ? s.join_channels : [];
           if (!arr.includes(token)) arr.push(token);
           s.join_channels = arr;
           await setSettings(env, s);
           await tgSendMessage(env, chat_id, `✅ افزوده شد: ${token}\nکانال‌های فعلی: ${arr.join(', ') || '—'}\nمی‌توانید کانال بعدی را ارسال کنید یا با /update خارج شوید.`);
+          return;
+        }
+        if (state?.step === 'adm_join_edit_wait' && typeof state?.index === 'number') {
+          const token = normalizeChannelToken(text);
+          if (!token) { await tgSendMessage(env, chat_id, '❌ کانال نامعتبر است. نمونه: @channel یا لینک کامل'); return; }
+          // Verify bot admin status for this channel
+          const chk = await checkBotAdminForToken(env, token);
+          if (!chk.verifiable) { await tgSendMessage(env, chat_id, '⚠️ امکان بررسی این لینک وجود ندارد (احتمالاً لینک دعوت/خصوصی). لطفاً ربات را به کانال اضافه و ادمین کنید و سپس نام کاربری عمومی (@username) را ارسال کنید.'); return; }
+          if (!chk.isAdmin) { await tgSendMessage(env, chat_id, '❌ ربات در این کانال ادمین نیست. عملیات ناموفق بود. ابتدا ربات را ادمین کانال کنید سپس دوباره تلاش کنید.'); return; }
+          const s = await getSettings(env);
+          const arr = Array.isArray(s.join_channels) ? s.join_channels : [];
+          const idx = state.index;
+          if (idx < 0 || idx >= arr.length) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'ردیف نامعتبر است.'); return; }
+          arr[idx] = token;
+          s.join_channels = arr;
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, `✏️ ویرایش شد: ردیف ${idx+1}\nکانال جدید: ${token}\nفهرست فعلی: ${arr.join(', ') || '—'}`);
           return;
         }
         
@@ -3072,11 +3220,48 @@ async function onCallback(cb, env) {
       }
       if (data === 'adm_join') {
         const s = await getSettings(env);
-        const current = Array.isArray(s.join_channels) ? s.join_channels.join(', ') : '';
-        await setUserState(env, uid, { step: 'adm_join_wait' });
-        const txt = ` تنظیم جویین اجباری\nکانال‌های فعلی: ${current || '—'}\n\nلطفاً یک کانال یا لینک در هر پیام ارسال کنید.\nنمونه‌ها: @channel یا -100xxxxxxxxxx یا لینک کامل https://t.me/xxxx`;
-        await tgEditMessage(env, chat_id, mid, txt, {});
+        await clearUserState(env, uid);
+        await tgEditMessage(env, chat_id, mid, admJoinManageText(s), admJoinManageKb(s));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_join_add') {
+        await setUserState(env, uid, { step: 'adm_join_wait' });
+        await tgAnswerCallbackQuery(env, cb.id, 'یک کانال ارسال کنید');
+        await tgSendMessage(env, chat_id, '➕ لطفاً کانال را ارسال کنید (نمونه: @channel یا -100... یا لینک کامل). /update برای لغو');
+        return;
+      }
+      if (data.startsWith('adm_join_del:')) {
+        const idx = parseInt(data.split(':')[1]||'-1', 10);
+        const s = await getSettings(env);
+        const arr = Array.isArray(s.join_channels) ? s.join_channels : [];
+        if (idx >= 0 && idx < arr.length) {
+          const removed = arr.splice(idx, 1);
+          s.join_channels = arr;
+          await setSettings(env, s);
+          await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
+        } else {
+          await tgAnswerCallbackQuery(env, cb.id, 'ردیف نامعتبر');
+        }
+        await tgEditMessage(env, chat_id, mid, admJoinManageText(s), admJoinManageKb(s));
+        return;
+      }
+      if (data.startsWith('adm_join_edit:')) {
+        const idx = parseInt(data.split(':')[1]||'-1', 10);
+        const s = await getSettings(env);
+        const arr = Array.isArray(s.join_channels) ? s.join_channels : [];
+        if (!(idx >= 0 && idx < arr.length)) { await tgAnswerCallbackQuery(env, cb.id, 'ردیف نامعتبر'); return; }
+        await setUserState(env, uid, { step: 'adm_join_edit_wait', index: idx });
+        await tgAnswerCallbackQuery(env, cb.id, 'ویرایش');
+        await tgSendMessage(env, chat_id, `✏️ مقدار جدید برای ردیف ${idx+1} را ارسال کنید (نمونه: @channel یا لینک کامل). /update برای لغو`);
+        return;
+      }
+      if (data === 'adm_join_clear') {
+        const s = await getSettings(env);
+        s.join_channels = [];
+        await setSettings(env, s);
+        await tgAnswerCallbackQuery(env, cb.id, 'پاک شد');
+        await tgEditMessage(env, chat_id, mid, admJoinManageText(s), admJoinManageKb(s));
         return;
       }
       if (data === 'adm_files') {
