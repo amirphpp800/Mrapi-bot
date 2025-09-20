@@ -76,6 +76,69 @@ const CONFIG = {
 
 // صفحات فانکشنز env: { BOT_KV }
 
+// Simple Web Admin page for WireGuard Endpoints management
+function renderWgAdminPage(settings, notice = '') {
+  try {
+    const eps = Array.isArray(settings?.wg_endpoints) ? settings.wg_endpoints : [];
+    const rows = eps.map((e, i) => (
+      `<tr>
+         <td>${i + 1}</td>
+         <td><code>${e.hostport || ''}</code></td>
+         <td>${e.country || ''}</td>
+         <td>${e.flag || ''}</td>
+         <td><code>${e.server_pk || ''}</code></td>
+         <td>
+           <form method="post" style="margin:0;">
+             <input type="hidden" name="action" value="del" />
+             <input type="hidden" name="idx" value="${i}" />
+             <button type="submit">حذف</button>
+           </form>
+         </td>
+       </tr>`
+    )).join('');
+    const html = `<!doctype html>
+<html lang="fa"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>مدیریت Endpoint های WireGuard</title>
+<style>
+body{font-family:Tahoma,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 12px;background:#f7f7fb;color:#222}
+h1{font-size:20px}
+section{background:#fff;border-radius:10px;padding:16px;margin:12px 0;border:1px solid #eee}
+table{width:100%;border-collapse:collapse}
+th,td{border:1px solid #ddd;padding:8px;text-align:left}
+code{background:#f0f0f0;padding:2px 4px;border-radius:4px}
+.notice{color:#0a7}
+</style></head>
+<body>
+ <h1>مدیریت Endpoint های WireGuard</h1>
+ ${notice ? `<p class="notice">${notice}</p>` : ''}
+ <section>
+   <h2>افزودن Endpoint ها</h2>
+   <form method="post">
+     <input type="hidden" name="action" value="add" />
+     <p><label>لیست IP:PORT (هر خط یک مورد)<br/>
+       <textarea name="hostports" rows="6" style="width:100%" placeholder="1.2.3.4:51820"></textarea>
+     </label></p>
+     <p><label>کشور<br/><input name="country" style="width:100%" placeholder="آمریکا" /></label></p>
+     <p><label>پرچم<br/><input name="flag" style="width:100%" placeholder="🇺🇸" /></label></p>
+     <p><label>PublicKey سرور (اختیاری)<br/><input name="server_pk" style="width:100%" placeholder="Base64" /></label></p>
+     <p><button type="submit">ثبت</button></p>
+   </form>
+ </section>
+ <section>
+   <h2>فهرست Endpoint ها</h2>
+   <table>
+     <thead><tr><th>#</th><th>Host:Port</th><th>کشور</th><th>پرچم</th><th>PublicKey</th><th>اقدام</th></tr></thead>
+     <tbody>${rows || ''}</tbody>
+   </table>
+ </section>
+</body></html>`;
+    return html;
+  } catch (e) {
+    return '<!doctype html><html><body>خطا در ساخت صفحه</body></html>';
+  }
+}
+
 // Build a paginated keyboard for deleting unassigned DNS IPs in a country
 async function buildDnsDeleteListKb(env, version, country, page = 1) {
   const prefix = dnsPrefix(version);
@@ -3050,6 +3113,7 @@ async function onCallback(cb, env) {
           [{ text: `➕ افزودن آدرس DNS`, callback_data: 'adm_dns_add' }],
           [{ text: '🗑 حذف آدرس‌های DNS', callback_data: 'adm_dns_remove' }],
           [{ text: `موجودی DNS — IPv4: ${fmtNum(v4)} | IPv6: ${fmtNum(v6)}`, callback_data: 'noop' }],
+          [{ text: 'تنظیمات پایه ربات', callback_data: 'adm_basic' }],
           [{ text: '🆔 تنظیم آیدی پشتیبانی', callback_data: 'adm_support' }],
           [{ text: '🧩 پیشرفته سازی', callback_data: 'adm_advanced' }],
           [{ text: ' بازگشت', callback_data: 'admin' }],
@@ -4282,6 +4346,48 @@ async function routerFetch(request, env, ctx) {
     // /f/<token>
     if (path.startsWith('/f/')) {
       return await handleFileDownload(request, env);
+    }
+
+    // Web Admin: WireGuard endpoints management
+    if (path === '/admin/wg') {
+      const key = url.searchParams.get('key') || '';
+      const adminKey = (env?.ADMIN_WEB_KEY || '').trim();
+      if (!adminKey || key !== adminKey) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      if (request.method === 'POST') {
+        try {
+          const ct = request.headers.get('content-type') || '';
+          if (/application\/x-www-form-urlencoded/i.test(ct)) {
+            const formData = await request.formData();
+            const action = String(formData.get('action') || '').trim();
+            const s = await getSettings(env);
+            s.wg_endpoints = Array.isArray(s.wg_endpoints) ? s.wg_endpoints : [];
+            if (action === 'add') {
+              const lines = String(formData.get('hostports') || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+              const country = String(formData.get('country') || '').trim();
+              const flag = String(formData.get('flag') || '🌐').trim() || '🌐';
+              const server_pk = String(formData.get('server_pk') || '').trim();
+              for (const hp of lines) {
+                s.wg_endpoints.push({ hostport: hp, country, flag, server_pk });
+              }
+              await setSettings(env, s);
+              return new Response(renderWgAdminPage(s, 'افزوده شد'), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+            } else if (action === 'del') {
+              const idx = Number(String(formData.get('idx') || '').trim());
+              if (idx >= 0 && idx < s.wg_endpoints.length) {
+                s.wg_endpoints.splice(idx, 1);
+                await setSettings(env, s);
+                return new Response(renderWgAdminPage(s, 'حذف شد'), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+              }
+              return new Response(renderWgAdminPage(s, 'ردیف نامعتبر'), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+            }
+          }
+        } catch (e) { console.error('/admin/wg POST error', e); return new Response('خطا', { status: 500 }); }
+      }
+      // GET render
+      const s = await getSettings(env);
+      return new Response(renderWgAdminPage(s), { headers: { 'content-type': 'text/html; charset=utf-8' } });
     }
 
     // Root → status page
