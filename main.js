@@ -86,7 +86,6 @@ function renderWgAdminPage(settings, notice = '') {
          <td><code>${e.hostport || ''}</code></td>
          <td>${e.country || ''}</td>
          <td>${e.flag || ''}</td>
-         <td><code>${e.server_pk || ''}</code></td>
          <td>
            <form method="post" style="margin:0;">
              <input type="hidden" name="action" value="del" />
@@ -97,41 +96,57 @@ function renderWgAdminPage(settings, notice = '') {
        </tr>`
     )).join('');
     const html = `<!doctype html>
-<html lang="fa"><head><meta charset="utf-8" />
+<html lang="fa" dir="rtl"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>مدیریت Endpoint های WireGuard</title>
 <style>
-body{font-family:Tahoma,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 12px;background:#f7f7fb;color:#222}
-h1{font-size:20px}
-section{background:#fff;border-radius:10px;padding:16px;margin:12px 0;border:1px solid #eee}
-table{width:100%;border-collapse:collapse}
-th,td{border:1px solid #ddd;padding:8px;text-align:left}
-code{background:#f0f0f0;padding:2px 4px;border-radius:4px}
-.notice{color:#0a7}
+  @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;600&display=swap');
+  :root { --bg: #0f172a; --card: rgba(255,255,255,0.08); --text: #e5e7eb; --sub:#94a3b8; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; font-family:'Vazirmatn',sans-serif; background:#000; color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+  .container{ width:100%; max-width:900px; }
+  header{ text-align:center; margin-bottom:24px; }
+  h1{ font-weight:600; margin:0 0 6px; }
+  p{ margin:0; color:var(--sub); }
+  .grid{ display:grid; grid-template-columns:1fr; gap:16px; }
+  .card{ background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:16px; backdrop-filter: blur(10px); box-shadow:0 10px 30px rgba(0,0,0,0.6); }
+  .notice{ color:#34d399; margin:0 0 10px; }
+  table{ width:100%; border-collapse:collapse; }
+  th,td{ border:1px solid rgba(255,255,255,0.12); padding:8px; text-align:left; }
+  code{ background:rgba(255,255,255,0.08); padding:2px 4px; border-radius:4px; }
+  form .row{ display:flex; gap:8px; flex-wrap:wrap; }
+  textarea,input,button{ width:100%; border-radius:10px; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.06); color:#fff; padding:8px 10px; }
+  button{ background:#3b82f6; border:0; cursor:pointer; width:auto; }
 </style></head>
 <body>
- <h1>مدیریت Endpoint های WireGuard</h1>
- ${notice ? `<p class="notice">${notice}</p>` : ''}
- <section>
-   <h2>افزودن Endpoint ها</h2>
-   <form method="post">
-     <input type="hidden" name="action" value="add" />
-     <p><label>لیست IP:PORT (هر خط یک مورد)<br/>
-       <textarea name="hostports" rows="6" style="width:100%" placeholder="1.2.3.4:51820"></textarea>
-     </label></p>
-     <p><label>کشور<br/><input name="country" style="width:100%" placeholder="آمریکا" /></label></p>
-     <p><label>پرچم<br/><input name="flag" style="width:100%" placeholder="🇺🇸" /></label></p>
-     <p><label>PublicKey سرور (اختیاری)<br/><input name="server_pk" style="width:100%" placeholder="Base64" /></label></p>
-     <p><button type="submit">ثبت</button></p>
-   </form>
- </section>
- <section>
-   <h2>فهرست Endpoint ها</h2>
-   <table>
-     <thead><tr><th>#</th><th>Host:Port</th><th>کشور</th><th>پرچم</th><th>PublicKey</th><th>اقدام</th></tr></thead>
-     <tbody>${rows || ''}</tbody>
-   </table>
- </section>
+ <main class="container">
+  <header>
+    <h1>مدیریت Endpoint های WireGuard</h1>
+    <p>افزودن/حذف Endpoint ها — تغییرات بلافاصله در ربات اعمال می‌شود</p>
+  </header>
+  <section class="card">
+    ${notice ? `<div class="notice">${notice}</div>` : ''}
+    <h2 style="margin-top:0;">افزودن Endpoint ها</h2>
+    <form method="post">
+      <input type="hidden" name="action" value="add" />
+      <p><label>لیست IP:PORT (هر خط یک مورد)<br/>
+        <textarea name="hostports" rows="6" placeholder="1.2.3.4:51820"></textarea>
+      </label></p>
+      <div class="row">
+        <label style="flex:1 1 50%">کشور<br/><input name="country" placeholder="آمریکا" /></label>
+        <label style="flex:1 1 50%">پرچم<br/><input name="flag" placeholder="🇺🇸" /></label>
+      </div>
+      <p><button type="submit">ثبت</button></p>
+    </form>
+  </section>
+  <section class="card">
+    <h2 style="margin-top:0;">فهرست Endpoint ها</h2>
+    <table>
+      <thead><tr><th>#</th><th>Host:Port</th><th>کشور</th><th>پرچم</th><th>اقدام</th></tr></thead>
+      <tbody>${rows || ''}</tbody>
+    </table>
+  </section>
+ </main>
 </body></html>`;
     return html;
   } catch (e) {
