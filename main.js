@@ -1416,14 +1416,6 @@ async function onMessage(msg, env) {
         return;
       }
       // (moved WG filename handler below)
-      if (data === 'adm_support') {
-        const s = await getSettings(env);
-        const cur = s?.support_url || '';
-        await setUserState(env, uid, { step: 'adm_support_url' });
-        await tgAnswerCallbackQuery(env, cb.id);
-        await tgSendMessage(env, chat_id, `آیدی یا لینک پشتیبانی فعلی: ${cur || '—'}\nنمونه مجاز: @YourSupport یا https://t.me/YourSupport\nمقدار جدید را ارسال کنید:`);
-        return;
-      }
     } catch {}
 
     // If update mode is on, block non-admin users globally
