@@ -1433,8 +1433,10 @@ async function onMessage(msg, env) {
 
     // دستورات متنی
     const text = msg.text || msg.caption || '';
+    // Fetch state for WG filename flow (avoid name clash with later 'state')
+    const st = await getUserState(env, uid);
     // User: WireGuard — ask for filename and send .conf (by country, random endpoint)
-    if (state?.step === 'ps_wg_name' && (typeof state?.ep_idx === 'number' || state?.country)) {
+    if (st?.step === 'ps_wg_name' && (typeof st?.ep_idx === 'number' || st?.country)) {
       const name = String(text || '').trim();
       const valid = /^[A-Za-z0-9_]{1,12}$/.test(name);
       if (!valid) {
@@ -1445,12 +1447,12 @@ async function onMessage(msg, env) {
       const list = Array.isArray(s2?.wg_endpoints) ? s2.wg_endpoints : [];
       let ep = null;
       let idx = -1;
-      if (state.country) {
-        const pick = pickWgEndpointWithCapacity(list, state.country);
+      if (st.country) {
+        const pick = pickWgEndpointWithCapacity(list, st.country);
         if (!pick) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ در این لوکیشن ظرفیت آزاد موجود نیست.'); return; }
         ep = pick; idx = Number(pick.__idx);
       } else {
-        idx = Number(state.ep_idx);
+        idx = Number(st.ep_idx);
         if (!(idx >= 0 && idx < list.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ Endpoint نامعتبر.'); return; }
         ep = list[idx];
       }
@@ -1472,8 +1474,14 @@ async function onMessage(msg, env) {
       lines.push(`Endpoint = ${ep.hostport}`);
       const cfg = lines.join('\n');
       const filename = `${name}.conf`;
-      const blob = new Blob([cfg], { type: 'text/plain' });
-      await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
+      try {
+        const blob = new Blob([cfg], { type: 'text/plain' });
+        await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
+      } catch (e) {
+        console.error('tgSendDocument wg conf error', e);
+        await tgSendMessage(env, chat_id, `⚠️ ارسال فایل ناموفق بود. می‌توانید متن زیر را ذخیره کنید با نام <code>${filename}</code>:
+<pre>${htmlEscape(cfg)}</pre>`);
+      }
       if (idx >= 0) {
         s2.wg_endpoints[idx] = s2.wg_endpoints[idx] || {};
         const used = Number(s2.wg_endpoints[idx].used_count || 0) + 1;
