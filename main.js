@@ -1,3 +1,4 @@
+ 
 /*
   main.js — Cloudflare Pages Functions Worker for a Telegram bot
 
@@ -19,7 +20,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '4.1-optimized',
+  BOT_VERSION: '4.1-optimized + Ai',
   
   // Performance settings
   MAX_CACHE_SIZE: 1000,
@@ -80,6 +81,31 @@ const CONFIG = {
 };
 
 // صفحات فانکشنز env: { BOT_KV }
+
+// Generate a client keypair for WireGuard (X25519). Returns { priv, pub } as base64.
+// Fallback: if WebCrypto X25519 is unavailable, returns { priv: generateWgPrivateKey(), pub: '' }.
+async function generateWgKeypair() {
+  try {
+    if (crypto && crypto.subtle && crypto.subtle.generateKey) {
+      const kp = await crypto.subtle.generateKey(
+        { name: 'X25519' },
+        true,
+        ['deriveBits']
+      );
+      // Export private key (raw) and public key (raw), then base64
+      const [rawPriv, rawPub] = await Promise.all([
+        crypto.subtle.exportKey('raw', kp.privateKey),
+        crypto.subtle.exportKey('raw', kp.publicKey)
+      ]);
+      const priv = bytesToBase64(new Uint8Array(rawPriv));
+      const pub = bytesToBase64(new Uint8Array(rawPub));
+      return { priv, pub };
+    }
+  } catch (e) {
+    console.warn('generateWgKeypair fallback:', e?.message || e);
+  }
+  return { priv: generateWgPrivateKey(), pub: '' };
+}
 
 // Memory management for caches
 const CACHE_REGISTRY = new WeakMap();
@@ -242,6 +268,9 @@ async function buildDnsDeleteListKb(env, version, country, page = 1) {
   const start = (p - 1) * per;
   const chunk = ips.slice(start, start + per);
   const rows = chunk.map(ip => ([{ text: ip, callback_data: `adm_dns_del_ip:${version}:${ip}:${country}` }]));
+  if (rows.length === 0) {
+    rows.push([{ text: '— هیچ آی‌پی آزاد در این کشور نیست —', callback_data: 'noop' }]);
+  }
   // Nav
   if (totalPages > 1) {
     const prev = p > 1 ? p - 1 : totalPages;
@@ -1816,7 +1845,7 @@ async function onMessage(msg, env) {
         ep = list[idx];
       }
       const d = s2.wg_defaults || {};
-      const priv = generateWgPrivateKey();
+      const { priv } = await generateWgKeypair();
       const lines = [];
       lines.push('[Interface]');
       lines.push(`PrivateKey = ${priv}`);
@@ -1826,6 +1855,10 @@ async function onMessage(msg, env) {
       if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
       lines.push('');
       lines.push('[Peer]');
+      {
+        const serverPub = await getWgServerPublicKey(env, ep);
+        if (serverPub) lines.push(`PublicKey = ${serverPub}`);
+      }
       if (d.allowed_ips) lines.push(`AllowedIPs = ${d.allowed_ips}`);
       if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
         lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
@@ -1838,9 +1871,12 @@ async function onMessage(msg, env) {
         await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
       } catch (e) {
         console.error('tgSendDocument wg conf error', e);
-        await tgSendMessage(env, chat_id, `⚠️ ارسال فایل ناموفق بود. می‌توانید متن زیر را ذخیره کنید با نام <code>${filename}</code>:
-<pre>${htmlEscape(cfg)}</pre>`);
+        await tgSendMessage(env, chat_id, `⚠️ ارسال فایل ناموفق بود. می‌توانید متن زیر را ذخیره کنید با نام <code>${filename}</code>:\n<pre>${htmlEscape(cfg)}</pre>`);
       }
+      // Save WG config for later resend (outside of send try/catch)
+      try { await saveUserConfigItem(env, uid, 'wg', { filename, country: ep.country || '', content: cfg, dns: d.dns }); } catch {}
+      // Inform about deduction (best-effort)
+      try { await tgSendMessage(env, chat_id, `✅ ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} کسر شد. در حال ارسال کانفیگ...`); } catch {}
       if (idx >= 0) {
         s2.wg_endpoints[idx] = s2.wg_endpoints[idx] || {};
         const used = Number(s2.wg_endpoints[idx].used_count || 0) + 1;
@@ -1977,6 +2013,45 @@ async function onMessage(msg, env) {
           await kvSet(env, key, meta);
           await clearUserState(env, uid);
           await tgSendMessage(env, chat_id, `✅ کانفیگ اوپن وی‌پی‌ان ذخیره شد.\n${loc} (${proto})`);
+          return;
+        }
+        // Admin: WireGuard defaults editing (generic)
+        if (state?.step === 'adm_wg_edit' && state?.field) {
+          const field = String(state.field);
+          const valRaw = String(text || '').trim();
+          const s = await getSettings(env);
+          s.wg_defaults = s.wg_defaults || {};
+          if (field === 'mtu') {
+            const v = Number(valRaw.replace(/[^0-9]/g, ''));
+            if (!Number.isFinite(v) || v <= 0) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد صحیح ارسال کنید:'); return; }
+            s.wg_defaults.mtu = v;
+          } else if (field === 'listen_port') {
+            const v = Number(valRaw.replace(/[^0-9]/g, ''));
+            s.wg_defaults.listen_port = v || undefined;
+          } else if (field === 'address') {
+            s.wg_defaults.address = valRaw;
+          } else if (field === 'dns') {
+            s.wg_defaults.dns = valRaw;
+          } else if (field === 'allowed_ips') {
+            s.wg_defaults.allowed_ips = valRaw;
+          } else if (field === 'persistent_keepalive') {
+            const v = Number(valRaw.replace(/[^0-9]/g, ''));
+            s.wg_defaults.persistent_keepalive = (v && v > 0) ? v : undefined;
+          } else if (field === 'peer_public_mode') {
+            const mode = valRaw.toLowerCase();
+            if (!['cloudflare','endpoint','custom'].includes(mode)) { await tgSendMessage(env, chat_id, '❌ حالت نامعتبر است. یکی از این‌ها: cloudflare | endpoint | custom'); return; }
+            s.wg_defaults.peer_public_mode = mode;
+          } else if (field === 'peer_public_key') {
+            // basic validation for base64 length
+            if (valRaw && valRaw.length < 30) { await tgSendMessage(env, chat_id, '❌ کلید نامعتبر است. مقدار Base64 صحیح ارسال کنید.'); return; }
+            s.wg_defaults.peer_public_key = valRaw;
+          } else {
+            await tgSendMessage(env, chat_id, 'فیلد ناشناخته.');
+            return;
+          }
+          await setSettings(env, s);
+          await clearUserState(env, uid);
+          await tgSendMessage(env, chat_id, '✅ ذخیره شد.', kb([[{ text: '🔙 بازگشت', callback_data: 'adm_wg_defaults' }]]));
           return;
         }
         await tgSendMessage(env, chat_id, 'لطفاً فایل .ovpn را به صورت سند (Document) ارسال کنید.');
@@ -2801,6 +2876,92 @@ async function onCallback(cb, env) {
       return;
     }
 
+    // Send main menu as a NEW message (do not edit the current one) — preserves previous message content
+    if (data === 'back_main_new') {
+      if (!Array.isArray(env.__cbtnRowsCache)) { try { await rebuildCustomButtonsCache(env); } catch {} }
+      const hdr = await mainMenuHeader(env);
+      await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    // My Configs: list DNS/WG/OVPN configs for the user
+    if (data === 'my_configs') {
+      const rows = [];
+      // DNS assigned to this user
+      try {
+        const dnsRows = await listUserDnsConfigs(env, uid, 10);
+        if (dnsRows.length) {
+          rows.push([{ text: '🌐 DNS', callback_data: 'noop' }]);
+          rows.push(...dnsRows);
+        }
+      } catch {}
+      // WireGuard saved configs
+      try {
+        const wgItems = await getUserConfigList(env, uid, 'wg');
+        if (wgItems.length) {
+          rows.push([{ text: '🛡 WireGuard', callback_data: 'noop' }]);
+          for (const it of wgItems) {
+            rows.push([{ text: `${it.country || ''} — ${it.filename || 'wg.conf'}`, callback_data: 'resend_wg:' + it.id }]);
+          }
+        }
+      } catch {}
+      // OpenVPN saved configs
+      try {
+        const ovpnItems = await getUserConfigList(env, uid, 'ovpn');
+        if (ovpnItems.length) {
+          rows.push([{ text: '🔐 OpenVPN', callback_data: 'noop' }]);
+          for (const it of ovpnItems) {
+            rows.push([{ text: `${it.loc || ''} (${it.proto || ''})`, callback_data: 'resend_ovpn:' + it.id }]);
+          }
+        }
+      } catch {}
+      if (!rows.length) {
+        rows.push([{ text: 'چیزی یافت نشد', callback_data: 'noop' }]);
+      }
+      rows.push([{ text: '🔙 بازگشت', callback_data: 'account' }]);
+      await tgSendMessage(env, chat_id, '📦 کانفیگ‌های شما:', kb(rows));
+      await tgAnswerCallbackQuery(env, cb.id);
+      return;
+    }
+
+    if (data.startsWith('resend_dns:')) {
+      const m = data.split(':');
+      const version = m[1] === 'v6' ? 'v6' : 'v4';
+      const ip = m[2];
+      const key = dnsPrefix(version) + ip;
+      let v = await kvGet(env, key);
+      if (!v || String(v.assigned_to || '') !== String(uid)) {
+        // Fallback to saved profile item
+        const it = await getUserConfigList(env, uid, 'dns').then(arr => (arr||[]).find(x => x.ip === ip && (x.version||version) === version)).catch(() => null);
+        if (!it) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        v = { ip: it.ip, country: it.country, flag: it.flag };
+      }
+      const caption = `🌐 <b>DNS اختصاصی شما</b>\n\n${v.flag || '🌐'} <b>${v.country || ''}</b>\n<code>${ip}</code>`;
+      await tgSendMessage(env, chat_id, caption, kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main_new' }]]));
+      await tgAnswerCallbackQuery(env, cb.id, 'ارسال شد');
+      return;
+    }
+
+    if (data.startsWith('resend_ovpn:')) {
+      const id = data.split(':')[1];
+      const it = await getUserConfigItem(env, uid, 'ovpn', id);
+      if (!it) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+      await tgSendDocument(env, chat_id, it.file_id, { caption: `اوپن وی‌پی‌ان — ${it.loc} (${it.proto})` });
+      await tgAnswerCallbackQuery(env, cb.id, 'ارسال شد');
+      return;
+    }
+
+    if (data.startsWith('resend_wg:')) {
+      const id = data.split(':')[1];
+      const it = await getUserConfigItem(env, uid, 'wg', id);
+      if (!it) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+      const blob = new Blob([it.content || ''], { type: 'text/plain' });
+      await tgSendDocument(env, chat_id, { blob, filename: it.filename || 'wg.conf' }, { caption: `📄 فایل کانفیگ WireGuard (${it.country || ''})` });
+      await tgAnswerCallbackQuery(env, cb.id, 'ارسال شد');
+      return;
+    }
+
     // Custom purchasable buttons — user flow
     if (data.startsWith('cbtn:')) {
       const id = data.split(':')[1];
@@ -2873,6 +3034,7 @@ async function onCallback(cb, env) {
       const bal = fmtNum(u?.balance || 0);
       const kbAcc = kb([
         [ { text: '🆘 پشتیبانی', url: 'https://t.me/NeoDebug' }, { text: '🎫 ارسال تیکت', callback_data: 'ticket_new' } ],
+        [ { text: '📦 کانفیگ‌های من', callback_data: 'my_configs' } ],
         [ { text: '🔙 بازگشت', callback_data: 'back_main' } ]
       ]);
       const txt = [
@@ -2977,6 +3139,8 @@ async function onCallback(cb, env) {
       if (!ok) { await tgAnswerCallbackQuery(env, cb.id, 'خطا در کسر'); return; }
       try { await tgSendMessage(env, chat_id, `✅ ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} کسر شد. در حال ارسال کانفیگ...`); } catch {}
       await tgSendDocument(env, chat_id, meta.file_id, { caption: `اوپن وی‌پی‌ان — ${loc} (${proto})` });
+      // Save OVPN config for later resend
+      try { await saveUserConfigItem(env, uid, 'ovpn', { file_id: meta.file_id, loc, proto }); } catch {}
       // Stats: purchases and revenue
       await bumpStat(env, 'ovpn_purchases');
       await incStat(env, 'ovpn_revenue_coins', price);
@@ -3043,7 +3207,7 @@ async function onCallback(cb, env) {
         return;
       }
       const d = s2.wg_defaults || {};
-      const priv = generateWgPrivateKey();
+      const { priv } = await generateWgKeypair();
       const lines = [];
       lines.push('[Interface]');
       lines.push(`PrivateKey = ${priv}`);
@@ -3053,6 +3217,10 @@ async function onCallback(cb, env) {
       if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
       lines.push('');
       lines.push('[Peer]');
+      {
+        const serverPub = await getWgServerPublicKey(env, ep);
+        if (serverPub) lines.push(`PublicKey = ${serverPub}`);
+      }
       if (d.allowed_ips) lines.push(`AllowedIPs = ${d.allowed_ips}`);
       if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
         lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
@@ -3062,6 +3230,8 @@ async function onCallback(cb, env) {
       const filename = `${name}.conf`;
       const blob = new Blob([cfg], { type: 'text/plain' });
       await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📄 فایل کانفیگ WireGuard (${ep.country || ''})` });
+      // Save WG config for later resend
+      try { await saveUserConfigItem(env, uid, 'wg', { filename, country: ep.country || '', content: cfg }); } catch {}
       if (idx >= 0) {
         s2.wg_endpoints[idx] = s2.wg_endpoints[idx] || {};
         const used = Number(s2.wg_endpoints[idx].used_count || 0) + 1;
@@ -3198,7 +3368,8 @@ ${flag} <b>${country}</b>
 <code>185.51.200.1</code>
 ➖➖➖➖➖➖➖➖`;
       await tgAnswerCallbackQuery(env, cb.id, 'اختصاص یافت');
-      await tgSendMessage(env, chat_id, caption, kb([[{ text: '🔙 بازگشت', callback_data: 'ps_dns' }]]));
+      // Use a back-to-main button that does NOT edit this message (preserve receipt)
+      await tgSendMessage(env, chat_id, caption, kb([[{ text: '🏠 منوی اصلی', callback_data: 'back_main_new' }]]));
       await clearUserState(env, uid);
       return;
     }
@@ -3915,6 +4086,8 @@ ${flag} <b>${country}</b>
           [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
           [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
           [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
+          [{ text: `PublicKey Mode: ${d.peer_public_mode || 'endpoint'}`, callback_data: 'adm_wg_edit:peer_public_mode' }],
+          [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
@@ -3931,6 +4104,8 @@ ${flag} <b>${country}</b>
         if (field === 'address') prompt = 'Address را ارسال کنید — مثال: 10.66.66.2/32';
         if (field === 'dns') prompt = 'DNS را ارسال کنید — مثال: 10.202.10.10, 10.202.10.11';
         if (field === 'allowed_ips') prompt = 'AllowedIPs را ارسال کنید — مثال: 0.0.0.0/11';
+        if (field === 'peer_public_mode') prompt = 'حالت PublicKey را ارسال کنید: cloudflare | endpoint | custom';
+        if (field === 'peer_public_key') prompt = 'PublicKey اختصاصی سرور را بفرستید (Base64)';
         await tgSendMessage(env, chat_id, prompt);
         await tgAnswerCallbackQuery(env, cb.id);
         return;
@@ -4026,8 +4201,9 @@ ${flag} <b>${country}</b>
         const version = parts[1] === 'v6' ? 'v6' : 'v4';
         const country = parts.slice(2).join(':');
         const page = 1;
+        // Acknowledge first to avoid Telegram timeout spinner during KV scan
+        await tgAnswerCallbackQuery(env, cb.id, 'در حال بارگذاری...');
         await tgEditMessage(env, chat_id, mid, `حذف تکی آدرس‌های DNS (${version.toUpperCase()}) — ${country}\nروی هر آی‌پی برای حذف بزنید:`, await buildDnsDeleteListKb(env, version, country, page));
-        await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data.startsWith('adm_dns_list:')) {
@@ -4035,8 +4211,9 @@ ${flag} <b>${country}</b>
         const version = m[1] === 'v6' ? 'v6' : 'v4';
         const page = Number(m[2] || '1') || 1;
         const country = m.slice(3).join(':');
+        // Acknowledge first to avoid Telegram timeout spinner during KV scan
+        await tgAnswerCallbackQuery(env, cb.id, 'در حال بارگذاری...');
         await tgEditMessage(env, chat_id, mid, `حذف تکی آدرس‌های DNS (${version.toUpperCase()}) — ${country}\nروی هر آی‌پی برای حذف بزنید:`, await buildDnsDeleteListKb(env, version, country, page));
-        await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data.startsWith('adm_dns_del_ip:')) {
@@ -4059,13 +4236,30 @@ ${flag} <b>${country}</b>
         return;
       }
       if (data === 'adm_backup') {
-        await tgAnswerCallbackQuery(env, cb.id, 'در حال تهیه بکاپ...');
+        await tgAnswerCallbackQuery(env, cb.id, '✨ در حال تهیه بکاپ زیبا...');
         const pretty = await buildPrettyBackup(env);
         const json = JSON.stringify(pretty, null, 2);
+        
+        // Calculate backup size
+        const backupSizeKB = Math.round((new Blob([json]).size) / 1024);
+        if (pretty["🔧 Metadata"] && pretty["🔧 Metadata"]["📊 Summary"]) {
+          pretty["🔧 Metadata"]["📊 Summary"]["💾 Backup Size"] = `${backupSizeKB} KB`;
+        }
+        
+        // Re-stringify with updated size
+        const finalJson = JSON.stringify(pretty, null, 2);
+        
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `backup-${ts}.json`;
-        const blob = new Blob([json], { type: 'application/json' });
-        await tgSendDocument(env, chat_id, { blob, filename }, { caption: `📦 بکاپ کامل دیتابیس\nفایل: <code>${filename}</code>` });
+        const filename = `🗄️ Database-Backup-${ts}.json`;
+        const blob = new Blob([finalJson], { type: 'application/json' });
+        
+        const caption = `✨ بکاپ زیبای دیتابیس آماده شد!\n\n` +
+          `📁 نام فایل: <code>${filename}</code>\n` +
+          `📊 حجم: ${backupSizeKB} کیلوبایت\n` +
+          `🕐 زمان تولید: ${new Date().toLocaleString('fa-IR')}\n` +
+          `🎨 فرمت: JSON زیبا و خوانا`;
+        
+        await tgSendDocument(env, chat_id, { blob, filename }, { caption });
         return;
       }
       if (data === 'adm_ovpn_upload') {
@@ -4423,49 +4617,101 @@ ${flag} <b>${country}</b>
       }
       if (data === 'help') {
         const lines = [
-          ' راهنمای دستورات',
+          '📚 راهنمای کامل مدیریت ربات',
+          '═══════════════════════════════',
           '',
-          'دستورات عمومی:',
-          '/start — شروع و نمایش منوی اصلی',
-          '/update — بروزرسانی منو و لغو فرآیندهای در حال انجام',
+          '🔧 دستورات اصلی:',
+          '• /start — شروع و نمایش منوی اصلی',
+          '• /update — بروزرسانی منو و لغو عملیات جاری',
+          '• /who <user_id> — مشاهده جزئیات کاربر (ادمین)',
           '',
-          'دستورات ادمین:',
-          '/who <user_id> — مشاهده اطلاعات کاربر (فقط مدیران)',
+          '👥 مدیریت کاربران:',
+          '• 📊 آمار ربات — نمایش آمار کلی کاربران و فعالیت‌ها',
+          '• ➕ افزودن سکه — اعطای سکه به کاربر خاص',
+          '• ➖ کسر سکه — کسر سکه از کاربر مشخص',
+          '• ⛔️ بلاک کاربر — مسدود کردن کاربر از استفاده',
+          '• 📛 انبلاک کاربر — رفع مسدودیت کاربر',
           '',
-          'از منوی ربات:',
-          '👤 حساب کاربری — مشاهده آیدی، نام و موجودی',
-          '👥 معرفی دوستان — دریافت لینک دعوت و مشاهده تعداد معرفی‌ها',
-          '🎁 کد هدیه — ثبت کد هدیه و افزایش موجودی',
-          '🔑 دریافت با توکن — واردکردن توکن ۶ کاراکتری برای دریافت فایل',
-          '🪙 خرید سکه — انتخاب پلن، مشاهده اطلاعات پرداخت و ارسال رسید',
+          '🗄️ مدیریت داده‌ها:',
+          '• 🧰 بکاپ دیتابیس — تهیه بکاپ زیبا و کامل از تمام داده‌ها',
+          '• 📁 مدیریت فایل‌ها — کنترل فایل‌های آپلود شده',
+          '• 🎫 مدیریت تیکت‌ها — پاسخ و بررسی درخواست‌های پشتیبانی',
           '',
-          'ارسال فایل (Document) — ذخیره فایل و دریافت لینک (برای مدیران در بخش آپلود پیشرفته قابل قیمت‌گذاری/محدودسازی است)',
+          '⚙️ تنظیمات سیستم:',
+          '• 🔧 تنظیمات سرویس — فعال/غیرفعال کردن بخش‌های مختلف',
+          '• 📣 جویین اجباری — مدیریت کانال‌های الزامی عضویت',
+          '• 💰 مدیریت مارکت — تنظیم محصولات قابل خرید',
+          '• 🎁 مدیریت کدهای هدیه — ایجاد و کنترل کدهای تخفیف',
           '',
-          'بخش‌های مدیریت مهم:',
-          '⚙️ تنظیمات سرویس — مدیریت دکمه‌های غیرفعال، آپلود OVPN، افزودن/حذف آدرس‌های DNS، تنظیم آیدی پشتیبانی',
-          '🧩 پیشرفته سازی — تنظیم قیمت‌های پیشفرض (DNS/OVPN) و تنظیمات WireGuard',
-          'WireGuard — ویرایش مقادیر پیشفرض (Address, DNS, MTU, ListenPort, AllowedIPs, PersistentKeepalive) و مدیریت Endpoint ها',
-          'حذف DNS — حذف تکی آی‌پی‌ها به تفکیک کشور و نسخه (IPv4/IPv6)',
+          '🌐 مدیریت شبکه:',
+          '• 🔐 آپلود OpenVPN — مدیریت کانفیگ‌های VPN',
+          '• 🌍 مدیریت DNS — افزودن/حذف سرورهای DNS',
+          '• ⚡ WireGuard — تنظیمات پیشرفته WireGuard',
+          '',
+          '📢 ارتباطات:',
+          '• 📢 پیام همگانی — ارسال پیام به همه کاربران',
+          '• 💬 پشتیبانی — مدیریت پیام‌های پشتیبانی',
+          '• 📊 گزارش‌گیری — آمار تفصیلی عملکرد',
+          '',
+          '🎨 ویژگی‌های پیشرفته:',
+          '• 🧩 قیمت‌گذاری هوشمند — تنظیم قیمت خودکار',
+          '• 🔄 سیستم ارجاع — مدیریت برنامه معرفی دوستان',
+          '• 📈 آنالیتیکس — تحلیل رفتار کاربران',
+          '• 🛡️ امنیت — کنترل دسترسی و مجوزها',
+          '',
+          '💡 نکات مهم:',
+          '• همیشه قبل از تغییرات مهم، بکاپ تهیه کنید',
+          '• از بخش آمار برای نظارت بر عملکرد استفاده کنید',
+          '• پیام‌های همگانی را با احتیاط ارسال کنید',
+          '• تنظیمات DNS و VPN را با دقت انجام دهید',
+          '',
+          '🆘 در صورت بروز مشکل:',
+          '• ابتدا از بخش آمار وضعیت سیستم را بررسی کنید',
+          '• از بکاپ‌های تهیه شده برای بازیابی استفاده کنید',
+          '• لاگ‌های خطا را در کنسول بررسی کنید',
         ];
-        await tgEditMessage(env, chat_id, mid, lines.join('\n'), kb([[{ text: '🔙 بازگشت', callback_data: 'back_main' }]]));
+        await tgEditMessage(env, chat_id, mid, lines.join('\n'), kb([
+          [{ text: '📊 آمار سیستم', callback_data: 'adm_stats' }],
+          [{ text: '🧰 بکاپ سریع', callback_data: 'adm_backup' }],
+          [{ text: '🔙 بازگشت به منو', callback_data: 'back_main' }]
+        ]));
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data === 'adm_backup') {
         try {
-          // ساخت بکاپ مرتب از تمام کلیدهای KV
-          const raw = await buildBackup(env);
-          const pretty = JSON.stringify(raw, null, 2);
+          await tgAnswerCallbackQuery(env, cb.id, '✨ در حال تهیه بکاپ زیبا...');
+          
+          // Use the beautiful backup function instead of raw backup
+          const pretty = await buildPrettyBackup(env);
+          const json = JSON.stringify(pretty, null, 2);
+          
+          // Calculate backup size
+          const backupSizeKB = Math.round((new Blob([json]).size) / 1024);
+          if (pretty["🔧 Metadata"] && pretty["🔧 Metadata"]["📊 Summary"]) {
+            pretty["🔧 Metadata"]["📊 Summary"]["💾 Backup Size"] = `${backupSizeKB} KB`;
+          }
+          
+          // Re-stringify with updated size
+          const finalJson = JSON.stringify(pretty, null, 2);
+          
           const ts = new Date();
           const pad = (n) => String(n).padStart(2, '0');
-          const fname = `backup-${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.json`;
-          const blob = new Blob([pretty], { type: 'application/json' });
-          await tgSendDocument(env, chat_id, { blob, filename: fname }, { caption: `🧰 بکاپ دیتابیس — ${fname}` });
-          await tgAnswerCallbackQuery(env, cb.id, 'بکاپ ارسال شد');
+          const fname = `🗄️ Database-Backup-${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.json`;
+          const blob = new Blob([finalJson], { type: 'application/json' });
+          
+          const caption = `✨ بکاپ زیبای دیتابیس آماده شد!\n\n` +
+            `📁 نام فایل: <code>${fname}</code>\n` +
+            `📊 حجم: ${backupSizeKB} کیلوبایت\n` +
+            `🕐 زمان تولید: ${new Date().toLocaleString('fa-IR')}\n` +
+            `🎨 فرمت: JSON زیبا و خوانا با ایموجی و دسته‌بندی کامل`;
+          
+          await tgSendDocument(env, chat_id, { blob, filename: fname }, { caption });
+          await tgAnswerCallbackQuery(env, cb.id, '✅ بکاپ زیبا ارسال شد');
         } catch (e) {
           console.error('adm_backup error', e);
-          await tgAnswerCallbackQuery(env, cb.id, 'خطا در بکاپ');
-          await tgSendMessage(env, chat_id, '❌ خطا در تهیه بکاپ.');
+          await tgAnswerCallbackQuery(env, cb.id, '❌ خطا در بکاپ');
+          await tgSendMessage(env, chat_id, '❌ خطا در تهیه بکاپ زیبا.');
         }
         return;
       }
@@ -4765,6 +5011,27 @@ function dnsPrefix(version) {
   return version === 'v6' ? CONFIG.DNS_PREFIX_V6 : CONFIG.DNS_PREFIX_V4;
 }
 
+// ===== WireGuard Helpers =====
+// Determine server public key to place in [Peer] section
+async function getWgServerPublicKey(env, ep) {
+  try {
+    const s = await getSettings(env);
+    const d = s?.wg_defaults || {};
+    const mode = (d.peer_public_mode || '').toLowerCase();
+    if (mode === 'cloudflare') {
+      // Cloudflare public key requested by user
+      return 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=';
+    }
+    // custom: use explicit key from defaults if provided
+    if (d.peer_public_key && typeof d.peer_public_key === 'string' && d.peer_public_key.length > 20) {
+      return d.peer_public_key.trim();
+    }
+    // fallback: if endpoint has a public_key field
+    if (ep && ep.public_key) return String(ep.public_key);
+  } catch {}
+  return '';
+}
+
 async function putDnsAddresses(env, version, ips, country, flag, added_by, maxUsers = 0) {
   let added = 0;
   const ver = (version === 'v6') ? 'v6' : 'v4';
@@ -4846,6 +5113,8 @@ async function allocateDnsForUser(env, uid, version) {
           if (maxUsers === 1) {
             await kvDel(env, key);
           }
+          // Save DNS meta for user for later resend
+          try { await saveUserConfigItem(env, uid, 'dns', { ip: v.ip, version: v.version, country: v.country, flag: v.flag }); } catch {}
           return { ip: v.ip, version: v.version, country: v.country, flag: v.flag };
         }
       }
@@ -4929,6 +5198,71 @@ async function countAvailableDnsByCountry(env, version, country) {
     
     return cnt;
   } catch (e) { console.error('countAvailableDnsByCountry error', e); return 0; }
+}
+
+// ===== User Configs Helpers (DNS list + WG/OVPN saved) =====
+// Build inline rows for user's assigned DNS entries (both v4 and v6)
+async function listUserDnsConfigs(env, uid, limit = 20) {
+  const makeRows = async (version) => {
+    const rows = [];
+    const prefix = dnsPrefix(version);
+    let cursor = undefined;
+    do {
+      const list = await env.BOT_KV.list({ prefix, limit: 1000, cursor });
+      for (const k of list.keys) {
+        const v = await kvGet(env, k.name);
+        if (v && String(v.assigned_to || '') === String(uid)) {
+          const label = `${v.flag || '🌐'} ${v.country || ''} — ${v.ip}`;
+          rows.push([{ text: label, callback_data: `resend_dns:${version}:${v.ip}` }]);
+          if (rows.length >= limit) return rows;
+        }
+      }
+      cursor = list.cursor;
+    } while (cursor);
+    return rows;
+  };
+  const v4Rows = await makeRows('v4');
+  const v6Rows = await makeRows('v6');
+  // Also include saved items in user profile (if any)
+  const saved = await getUserConfigList(env, uid, 'dns').catch(() => []);
+  const seen = new Set([...v4Rows, ...v6Rows].map(r => (r[0]?.callback_data || '')));
+  const extra = [];
+  for (const it of (saved || [])) {
+    const cb = `resend_dns:${it.version || 'v4'}:${it.ip}`;
+    if (seen.has(cb)) continue;
+    const label = `${it.flag || '🌐'} ${it.country || ''} — ${it.ip}`;
+    extra.push([{ text: label, callback_data: cb }]);
+    if (v4Rows.length + v6Rows.length + extra.length >= limit) break;
+  }
+  return [...v4Rows, ...v6Rows, ...extra];
+}
+
+// Save and retrieve user config items (wg/ovpn) inside user profile
+async function getUserConfigList(env, uid, type) {
+  const u = await getUser(env, uid);
+  const list = (u && u.configs && Array.isArray(u.configs[type])) ? u.configs[type] : [];
+  return list;
+}
+
+async function getUserConfigItem(env, uid, type, id) {
+  const list = await getUserConfigList(env, uid, type);
+  return list.find(x => String(x.id) === String(id));
+}
+
+async function saveUserConfigItem(env, uid, type, item) {
+  const u = await getUser(env, uid) || { id: uid };
+  u.configs = u.configs || {};
+  const arr = Array.isArray(u.configs[type]) ? u.configs[type] : [];
+  // avoid duplicates: if comparable key exists
+  const key = (type === 'ovpn') ? `${item.loc}|${item.proto}` : (type === 'wg') ? `${item.filename}|${item.country}` : '';
+  const exists = arr.find(x => ((x.loc||'') + '|' + (x.proto||'')) === key || ((x.filename||'') + '|' + (x.country||'')) === key);
+  if (!exists) {
+    item.id = item.id || newToken(8);
+    arr.push(item);
+    u.configs[type] = arr;
+    await setUser(env, uid, u);
+  }
+  return true;
 }
 
 async function allocateDnsForUserByCountry(env, uid, version, country) {
@@ -5026,6 +5360,8 @@ async function getSettings(env) {
         address: '10.66.66.2/32',
         dns: '10.202.10.10, 10.202.10.11',
         mtu: 1360,
+        peer_public_mode: 'endpoint',
+        peer_public_key: '',
         listen_port: '',
         allowed_ips: '0.0.0.0/11'
       },
@@ -5135,57 +5471,155 @@ async function buildBackup(env) {
   } catch (e) { console.error('buildBackup error', e); return {}; }
 }
 
-// Build a pretty, structured backup JSON for export
+// Build a beautiful, structured backup JSON for export
 async function buildPrettyBackup(env) {
   try {
+    const startTime = Date.now();
     const list = await env.BOT_KV.list({ prefix: '' });
+    const currentDate = new Date();
+    
+    // Initialize counters for statistics
+    let userCount = 0;
+    let fileCount = 0;
+    let ticketCount = 0;
+    let giftCount = 0;
+    let purchaseCount = 0;
+    let ovpnCount = 0;
+    let blockedCount = 0;
+    let otherCount = 0;
+    
     const out = {
-      meta: {
-        bot_name: CONFIG.BOT_NAME,
-        bot_version: await getBotVersion(env),
-        generated_at: new Date().toISOString(),
+      "🔧 Metadata": {
+        "🤖 Bot Information": {
+          "name": CONFIG.BOT_NAME,
+          "version": await getBotVersion(env),
+          "backup_format_version": "2.0"
+        },
+        "📅 Backup Details": {
+          "generated_at": currentDate.toISOString(),
+          "generated_at_persian": currentDate.toLocaleDateString('fa-IR') + ' ' + currentDate.toLocaleTimeString('fa-IR'),
+          "timezone": "UTC",
+          "total_keys": list.keys.length
+        },
+        "📊 Summary": {
+          // Will be filled after processing
+        }
       },
-      settings: {},
-      stats: {},
-      users: {},
-      files: {},
-      tickets: {},
-      gifts: {},
-      purchases: {},
-      ovpn: {},
-      blocked_users: {},
-      other: {},
+      "⚙️ Settings": {},
+      "📈 Statistics": {},
+      "👥 Users": {},
+      "📁 Files": {},
+      "🎫 Tickets": {},
+      "🎁 Gifts": {},
+      "💰 Purchases": {},
+      "🔐 OpenVPN": {},
+      "🚫 Blocked Users": {},
+      "📦 Other Data": {}
     };
+
+    // Process all keys
     for (const k of list.keys) {
       const key = k.name;
       const raw = await kvGet(env, key, 'text');
+      
       // Try to parse JSON content where applicable
       let val = raw;
-      try { val = JSON.parse(raw); } catch {}
-      if (key === CONFIG.SERVICE_TOGGLE_KEY) { out.settings = val; continue; }
-      if (key === CONFIG.BASE_STATS_KEY) { out.stats = val; continue; }
+      try { 
+        val = JSON.parse(raw); 
+      } catch {
+        // Keep as string if not valid JSON
+      }
+
+      // Categorize data
+      if (key === CONFIG.SERVICE_TOGGLE_KEY) { 
+        out["⚙️ Settings"] = val; 
+        continue; 
+      }
+      
+      if (key === CONFIG.BASE_STATS_KEY) { 
+        out["📈 Statistics"] = val; 
+        continue; 
+      }
+      
       if (key.startsWith(CONFIG.USER_PREFIX) && !key.includes(':state')) {
-        out.users[key.replace(CONFIG.USER_PREFIX,'')] = val;
+        const userId = key.replace(CONFIG.USER_PREFIX, '');
+        out["👥 Users"][userId] = val;
+        userCount++;
         continue;
       }
+      
       if (key.startsWith(CONFIG.USER_PREFIX) && key.endsWith(':state')) {
         const uid = key.substring(CONFIG.USER_PREFIX.length, key.length - ':state'.length);
-        out.users[uid] = out.users[uid] || {};
-        out.users[uid].state = val;
+        out["👥 Users"][uid] = out["👥 Users"][uid] || {};
+        out["👥 Users"][uid].state = val;
         continue;
       }
-      if (key.startsWith(CONFIG.FILE_PREFIX)) { out.files[key.replace(CONFIG.FILE_PREFIX,'')] = val; continue; }
-      if (key.startsWith(CONFIG.TICKET_PREFIX)) { out.tickets[key.replace(CONFIG.TICKET_PREFIX,'')] = val; continue; }
-      if (key.startsWith(CONFIG.GIFT_PREFIX)) { out.gifts[key.replace(CONFIG.GIFT_PREFIX,'')] = val; continue; }
-      if (key.startsWith(CONFIG.PURCHASE_PREFIX)) { out.purchases[key.replace(CONFIG.PURCHASE_PREFIX,'')] = val; continue; }
-      if (key.startsWith(CONFIG.OVPN_PREFIX)) { out.ovpn[key.replace(CONFIG.OVPN_PREFIX,'')] = val; continue; }
-      if (key.startsWith(CONFIG.BLOCK_PREFIX)) { out.blocked_users[key.replace(CONFIG.BLOCK_PREFIX,'')] = val; continue; }
-      out.other[key] = val;
+      
+      if (key.startsWith(CONFIG.FILE_PREFIX)) { 
+        out["📁 Files"][key.replace(CONFIG.FILE_PREFIX, '')] = val; 
+        fileCount++;
+        continue; 
+      }
+      
+      if (key.startsWith(CONFIG.TICKET_PREFIX)) { 
+        out["🎫 Tickets"][key.replace(CONFIG.TICKET_PREFIX, '')] = val; 
+        ticketCount++;
+        continue; 
+      }
+      
+      if (key.startsWith(CONFIG.GIFT_PREFIX)) { 
+        out["🎁 Gifts"][key.replace(CONFIG.GIFT_PREFIX, '')] = val; 
+        giftCount++;
+        continue; 
+      }
+      
+      if (key.startsWith(CONFIG.PURCHASE_PREFIX)) { 
+        out["💰 Purchases"][key.replace(CONFIG.PURCHASE_PREFIX, '')] = val; 
+        purchaseCount++;
+        continue; 
+      }
+      
+      if (key.startsWith(CONFIG.OVPN_PREFIX)) { 
+        out["🔐 OpenVPN"][key.replace(CONFIG.OVPN_PREFIX, '')] = val; 
+        ovpnCount++;
+        continue; 
+      }
+      
+      if (key.startsWith(CONFIG.BLOCK_PREFIX)) { 
+        out["🚫 Blocked Users"][key.replace(CONFIG.BLOCK_PREFIX, '')] = val; 
+        blockedCount++;
+        continue; 
+      }
+      
+      out["📦 Other Data"][key] = val;
+      otherCount++;
     }
+
+    // Fill in the summary statistics
+    const processingTime = Date.now() - startTime;
+    out["🔧 Metadata"]["📊 Summary"] = {
+      "👥 Total Users": userCount,
+      "📁 Total Files": fileCount,
+      "🎫 Total Tickets": ticketCount,
+      "🎁 Total Gifts": giftCount,
+      "💰 Total Purchases": purchaseCount,
+      "🔐 Total OpenVPN Configs": ovpnCount,
+      "🚫 Total Blocked Users": blockedCount,
+      "📦 Other Data Items": otherCount,
+      "⏱️ Processing Time (ms)": processingTime,
+      "💾 Backup Size": "Will be calculated after JSON stringify"
+    };
+
     return out;
   } catch (e) {
     console.error('buildPrettyBackup error', e);
-    return {};
+    return {
+      "❌ Error": {
+        "message": "Failed to create backup",
+        "error": e.message,
+        "timestamp": new Date().toISOString()
+      }
+    };
   }
 }
 
