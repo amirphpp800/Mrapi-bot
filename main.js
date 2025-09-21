@@ -81,6 +81,18 @@ const CONFIG = {
 
 // صفحات فانکشنز env: { BOT_KV }
 
+// Helper function to format WireGuard default values for display
+function formatWgDefaultValue(field, value) {
+  if (!value && value !== 0) return '-';
+  switch(field) {
+    case 'mtu': return String(value);
+    case 'listen_port': return value ? String(value) : '(خودکار)';
+    case 'persistent_keepalive': return value ? `${value} ثانیه` : 'خاموش';
+    case 'peer_public_key': return value ? '✅ تنظیم شده' : '-';
+    default: return String(value);
+  }
+}
+
 // Generate a client keypair for WireGuard (X25519). Returns { priv, pub } as base64.
 // Fallback: if WebCrypto X25519 is unavailable, returns { priv: generateWgPrivateKey(), pub: '' }.
 async function generateWgKeypair() {
@@ -2093,7 +2105,14 @@ async function onMessage(msg, env) {
           const fresh = await getSettings(env);
           const cur = fresh?.wg_defaults || {};
           await clearUserState(env, uid);
-          await tgSendMessage(env, chat_id, `✅ ذخیره شد.\nمقدار فعلی ${field}: ${String(cur[field] ?? '-')}`, kb([[{ text: '🔙 بازگشت', callback_data: 'adm_wg_defaults' }]]));
+          
+          // Show updated value with proper formatting
+          const displayValue = formatWgDefaultValue(field, cur[field]);
+          
+          // Debug log to ensure settings are saved
+          console.log(`WireGuard ${field} updated:`, cur[field]);
+          
+          await tgSendMessage(env, chat_id, `✅ تنظیمات WireGuard به‌روزرسانی شد!\n\n📝 فیلد: ${field}\n💾 مقدار جدید: ${displayValue}\n\n🔄 تغییرات در منوی تنظیمات قابل مشاهده است.`, kb([[{ text: '🔙 بازگشت به تنظیمات', callback_data: 'adm_wg_defaults' }]]));
           return;
         }
         await tgSendMessage(env, chat_id, 'لطفاً فایل .ovpn را به صورت سند (Document) ارسال کنید.');
@@ -4154,24 +4173,25 @@ ${flag} <b>${country}</b>
         const s = await getSettings(env);
         const d = s.wg_defaults || {};
         const mode = String((d.peer_public_mode || 'cloudflare')).toLowerCase();
+        
         const rows = [
-          [{ text: `Address: ${d.address || '-'}`, callback_data: 'adm_wg_edit:address' }],
-          [{ text: `DNS: ${d.dns || '-'}`, callback_data: 'adm_wg_edit:dns' }],
-          [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
-          [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
-          [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
-          [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
+          [{ text: `📍 Address: ${formatWgDefaultValue('address', d.address)}`, callback_data: 'adm_wg_edit:address' }],
+          [{ text: `🌐 DNS: ${formatWgDefaultValue('dns', d.dns)}`, callback_data: 'adm_wg_edit:dns' }],
+          [{ text: `📏 MTU: ${formatWgDefaultValue('mtu', d.mtu)}`, callback_data: 'adm_wg_edit:mtu' }],
+          [{ text: `🔌 ListenPort: ${formatWgDefaultValue('listen_port', d.listen_port)}`, callback_data: 'adm_wg_edit:listen_port' }],
+          [{ text: `🛡 AllowedIPs: ${formatWgDefaultValue('allowed_ips', d.allowed_ips)}`, callback_data: 'adm_wg_edit:allowed_ips' }],
+          [{ text: `⏰ PersistentKeepalive: ${formatWgDefaultValue('persistent_keepalive', d.persistent_keepalive)}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
           [
             { text: `${mode==='cloudflare' ? '✅ ' : ''}Cloudflare`, callback_data: 'adm_wg_mode:cloudflare' },
             { text: `${mode==='endpoint' ? '✅ ' : ''}Auto Key`, callback_data: 'adm_wg_mode:endpoint' },
             { text: `${mode==='custom' ? '✅ ' : ''}Custom`, callback_data: 'adm_wg_mode:custom' },
           ],
-          [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
+          [{ text: `🔑 Custom PublicKey: ${formatWgDefaultValue('peer_public_key', d.peer_public_key)}`, callback_data: 'adm_wg_edit:peer_public_key' }],
           [{ text: '↩️ بازنشانی به پیش‌فرض‌ها', callback_data: 'adm_wg_reset' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
-        await tgEditMessage(env, chat_id, mid, 'پیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
+        await tgEditMessage(env, chat_id, mid, '⚙️ پیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -4182,27 +4202,31 @@ ${flag} <b>${country}</b>
         s.wg_defaults = s.wg_defaults || {};
         s.wg_defaults.peer_public_mode = sel;
         await setSettings(env, s);
-        const d = (await getSettings(env)).wg_defaults || {};
-        const mode = String((d.peer_public_mode || 'endpoint')).toLowerCase();
+        
+        // Re-fetch fresh data to ensure consistency
+        const fresh = await getSettings(env);
+        const d = fresh.wg_defaults || {};
+        const mode = String((d.peer_public_mode || 'cloudflare')).toLowerCase();
+        
         const rows = [
-          [{ text: `Address: ${d.address || '-'}`, callback_data: 'adm_wg_edit:address' }],
-          [{ text: `DNS: ${d.dns || '-'}`, callback_data: 'adm_wg_edit:dns' }],
-          [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
-          [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
-          [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
-          [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
+          [{ text: `📍 Address: ${formatWgDefaultValue('address', d.address)}`, callback_data: 'adm_wg_edit:address' }],
+          [{ text: `🌐 DNS: ${formatWgDefaultValue('dns', d.dns)}`, callback_data: 'adm_wg_edit:dns' }],
+          [{ text: `📏 MTU: ${formatWgDefaultValue('mtu', d.mtu)}`, callback_data: 'adm_wg_edit:mtu' }],
+          [{ text: `🔌 ListenPort: ${formatWgDefaultValue('listen_port', d.listen_port)}`, callback_data: 'adm_wg_edit:listen_port' }],
+          [{ text: `🛡 AllowedIPs: ${formatWgDefaultValue('allowed_ips', d.allowed_ips)}`, callback_data: 'adm_wg_edit:allowed_ips' }],
+          [{ text: `⏰ PersistentKeepalive: ${formatWgDefaultValue('persistent_keepalive', d.persistent_keepalive)}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
           [
             { text: `${mode==='cloudflare' ? '✅ ' : ''}Cloudflare`, callback_data: 'adm_wg_mode:cloudflare' },
-            { text: `${mode==='endpoint' ? '✅ ' : ''}Endpoint`, callback_data: 'adm_wg_mode:endpoint' },
+            { text: `${mode==='endpoint' ? '✅ ' : ''}Auto Key`, callback_data: 'adm_wg_mode:endpoint' },
             { text: `${mode==='custom' ? '✅ ' : ''}Custom`, callback_data: 'adm_wg_mode:custom' },
           ],
-          [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
+          [{ text: `🔑 Custom PublicKey: ${formatWgDefaultValue('peer_public_key', d.peer_public_key)}`, callback_data: 'adm_wg_edit:peer_public_key' }],
           [{ text: '↩️ بازنشانی به پیش‌فرض‌ها', callback_data: 'adm_wg_reset' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
-        await tgEditMessage(env, chat_id, mid, 'پیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
-        await tgAnswerCallbackQuery(env, cb.id, 'ذخیره شد');
+        await tgEditMessage(env, chat_id, mid, '⚙️ پیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, '✅ حالت PublicKey ذخیره شد');
         return;
       }
       if (data === 'adm_wg_reset') {
@@ -4214,24 +4238,36 @@ ${flag} <b>${country}</b>
           peer_public_mode: 'cloudflare',
           peer_public_key: '',
           listen_port: '',
-          allowed_ips: '0.0.0.0/11',
+          allowed_ips: '0.0.0.0/0',
           persistent_keepalive: undefined,
         };
         await setSettings(env, s);
-        const d = s.wg_defaults;
-        await tgEditMessage(env, chat_id, mid, '✅ به پیش‌فرض‌ها بازنشانی شد.\nپیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb([
-          [{ text: `Address: ${d.address || '-'}`, callback_data: 'adm_wg_edit:address' }],
-          [{ text: `DNS: ${d.dns || '-'}`, callback_data: 'adm_wg_edit:dns' }],
-          [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
-          [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
-          [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
-          [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
-          [{ text: `PublicKey Mode: ${d.peer_public_mode || 'endpoint'}`, callback_data: 'adm_wg_edit:peer_public_mode' }],
-          [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
+        
+        // Re-fetch to ensure consistency
+        const fresh = await getSettings(env);
+        const d = fresh.wg_defaults || {};
+        const mode = String((d.peer_public_mode || 'cloudflare')).toLowerCase();
+        
+        const rows = [
+          [{ text: `📍 Address: ${formatWgDefaultValue('address', d.address)}`, callback_data: 'adm_wg_edit:address' }],
+          [{ text: `🌐 DNS: ${formatWgDefaultValue('dns', d.dns)}`, callback_data: 'adm_wg_edit:dns' }],
+          [{ text: `📏 MTU: ${formatWgDefaultValue('mtu', d.mtu)}`, callback_data: 'adm_wg_edit:mtu' }],
+          [{ text: `🔌 ListenPort: ${formatWgDefaultValue('listen_port', d.listen_port)}`, callback_data: 'adm_wg_edit:listen_port' }],
+          [{ text: `🛡 AllowedIPs: ${formatWgDefaultValue('allowed_ips', d.allowed_ips)}`, callback_data: 'adm_wg_edit:allowed_ips' }],
+          [{ text: `⏰ PersistentKeepalive: ${formatWgDefaultValue('persistent_keepalive', d.persistent_keepalive)}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
+          [
+            { text: `${mode==='cloudflare' ? '✅ ' : ''}Cloudflare`, callback_data: 'adm_wg_mode:cloudflare' },
+            { text: `${mode==='endpoint' ? '✅ ' : ''}Auto Key`, callback_data: 'adm_wg_mode:endpoint' },
+            { text: `${mode==='custom' ? '✅ ' : ''}Custom`, callback_data: 'adm_wg_mode:custom' },
+          ],
+          [{ text: `🔑 Custom PublicKey: ${formatWgDefaultValue('peer_public_key', d.peer_public_key)}`, callback_data: 'adm_wg_edit:peer_public_key' }],
+          [{ text: '↩️ بازنشانی به پیش‌فرض‌ها', callback_data: 'adm_wg_reset' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
-        ]));
-        await tgAnswerCallbackQuery(env, cb.id, 'بازنشانی شد');
+        ];
+        
+        await tgEditMessage(env, chat_id, mid, '✅ تنظیمات WireGuard به پیش‌فرض‌ها بازنشانی شد!\n\n⚙️ پیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, '✅ بازنشانی کامل شد');
         return;
       }
       if (data.startsWith('adm_wg_edit:')) {
