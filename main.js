@@ -5601,6 +5601,11 @@ async function getSettings(env) {
         if (s.wg_defaults[k] === undefined) { s.wg_defaults[k] = v; changed = true; }
       }
     }
+    // Keep bot_version in KV synchronized with code version so UI reflects latest after deploy
+    if (s.bot_version !== CONFIG.BOT_VERSION) {
+      s.bot_version = CONFIG.BOT_VERSION;
+      changed = true;
+    }
     
     // Validate and fix wg_endpoints
     if (Array.isArray(s.wg_endpoints)) {
