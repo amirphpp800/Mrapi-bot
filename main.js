@@ -20,8 +20,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '4.3-optimized + Ai',
-  
+  BOT_VERSION: '4.4-optimized + Ai',
   // Performance settings
   MAX_CACHE_SIZE: 1000,
   CACHE_TTL: 300000, // 5 minutes
@@ -754,6 +753,25 @@ function normalizeDigits(str) {
     '٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9'
   };
   return str.replace(/[۰-۹٠-٩]/g, d => map[d] || d);
+}
+
+// Parse non-negative integer from user text with support for Persian digits and keywords
+function parseNonNegativeInt(text) {
+  const raw = String(text || '').trim();
+  const norm = normalizeDigits(raw);
+  // Support common keywords for unlimited
+  const t = norm.toLowerCase();
+  if (t === 'نامحدود' || t === 'infinite' || t === 'infinity' || t === 'unlimited' || t === '∞') return 0;
+  const n = Number(norm.replace(/[^0-9]/g, ''));
+  if (!Number.isFinite(n) || n < 0) return NaN;
+  return n;
+}
+
+// Parse positive integer (>0). Returns NaN if invalid
+function parsePositiveInt(text) {
+  const n = parseNonNegativeInt(text);
+  if (!Number.isFinite(n) || n <= 0) return NaN;
+  return n;
 }
 
 async function kvGet(env, key, type = 'json') {
@@ -2246,7 +2264,8 @@ async function onMessage(msg, env) {
         return;
       }
       if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit') {
-        const maxUsers = Number(String(text||'').replace(/[^0-9]/g, ''));
+        const maxUsersVal = parseNonNegativeInt(text);
+        if (!Number.isFinite(maxUsersVal)) { await tgSendMessage(env, chat_id, '❌ عدد نامعتبر است. یک عدد صحیح یا "نامحدود" ارسال کنید:'); return; }
         const tmp = state.tmp || {};
         const title = String(state.title || '').trim();
         const price = Number(state.price || 0);
@@ -2266,7 +2285,7 @@ async function onMessage(msg, env) {
           disabled: false,
           paid_users: [],
           users: [],
-          max_users: maxUsers >= 0 ? maxUsers : 0,
+          max_users: maxUsersVal >= 0 ? maxUsersVal : 0,
         };
         await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, meta);
         const s = await getSettings(env);
@@ -2292,8 +2311,9 @@ async function onMessage(msg, env) {
       if (isAdminUser(env, uid) && state?.step === 'adm_cbtn_limit_change' && state?.id) {
         const id = state.id;
         const m = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
-        const maxUsers = Number(String(text||'').replace(/[^0-9]/g, ''));
-        if (m) { m.max_users = maxUsers >= 0 ? maxUsers : 0; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
+        const maxUsersVal = parseNonNegativeInt(text);
+        if (!Number.isFinite(maxUsersVal)) { await tgSendMessage(env, chat_id, '❌ عدد نامعتبر است. یک عدد صحیح یا "نامحدود" ارسال کنید:'); return; }
+        if (m) { m.max_users = maxUsersVal >= 0 ? maxUsersVal : 0; await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, m); }
         await clearUserState(env, uid);
         await tgSendMessage(env, chat_id, '✅ محدودیت بروزرسانی شد.', mainMenuInlineKb());
         return;
@@ -2332,7 +2352,8 @@ async function onMessage(msg, env) {
         return;
       }
       if (isAdminUser(env, uid) && state?.step === 'adm_upload_limit') {
-        const maxUsers = Number(text.replace(/[^0-9]/g, ''));
+        const maxUsers = parseNonNegativeInt(text);
+        if (!Number.isFinite(maxUsers)) { await tgSendMessage(env, chat_id, '❌ عدد نامعتبر است. یک عدد صحیح یا "نامحدود" ارسال کنید:'); return; }
         const tmp = state.tmp || {};
         const price = Number(state.price || 0);
         const token = newToken(6);
@@ -2378,11 +2399,11 @@ async function onMessage(msg, env) {
         }
         // Admin: set default prices (OpenVPN/DNS)
         if (state?.step === 'adm_set_price' && state?.key) {
-          const amount = Number(String(text || '').replace(/[^0-9]/g, ''));
-          if (!amount && amount !== 0) { await tgSendMessage(env, chat_id, 'عدد نامعتبر است. یک مقدار عددی ارسال کنید:'); return; }
+          const amountParsed = parseNonNegativeInt(text);
+          if (!Number.isFinite(amountParsed)) { await tgSendMessage(env, chat_id, 'عدد نامعتبر است. یک مقدار عددی ارسال کنید:'); return; }
           const s = await getSettings(env);
-          if (state.key === 'ovpn') s.ovpn_price_coins = amount;
-          if (state.key === 'dns') s.dns_price_coins = amount;
+          if (state.key === 'ovpn') s.ovpn_price_coins = amountParsed;
+          if (state.key === 'dns') s.dns_price_coins = amountParsed;
           await setSettings(env, s);
           await clearUserState(env, uid);
           await tgSendMessage(env, chat_id, '✅ قیمت ذخیره شد.', mainMenuInlineKb());
@@ -2415,8 +2436,8 @@ async function onMessage(msg, env) {
         }
         // Admin: Plans — add
         if (state?.step === 'adm_plan_add_coins') {
-          const coins = Number(String(text || '').replace(/[^0-9]/g, ''));
-          if (!coins || coins <= 0) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد مثبت ارسال کنید:'); return; }
+          const coins = parsePositiveInt(text);
+          if (!Number.isFinite(coins)) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد مثبت ارسال کنید:'); return; }
           await setUserState(env, uid, { step: 'adm_plan_add_price', coins });
           await tgSendMessage(env, chat_id, 'برچسب قیمت پلن جدید را ارسال کنید (مثلاً ۱۵٬۰۰۰ تومان):');
           return;
@@ -2448,8 +2469,8 @@ async function onMessage(msg, env) {
         }
         // Admin: Plans — edit coins
         if (state?.step === 'adm_plan_edit_coins' && typeof state?.idx === 'number') {
-          const coins = Number(String(text || '').replace(/[^0-9]/g, ''));
-          if (!coins || coins <= 0) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد مثبت ارسال کنید:'); return; }
+          const coins = parsePositiveInt(text);
+          if (!Number.isFinite(coins)) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد مثبت ارسال کنید:'); return; }
           const s = await getSettings(env);
           let plans = Array.isArray(s?.plans) ? s.plans : [];
           // If plans are empty, initialize from CONFIG and persist to avoid invalid index
@@ -2536,28 +2557,8 @@ async function onMessage(msg, env) {
         if (state?.step === 'adm_dns_add_max_users' && Array.isArray(state?.ips) && state?.version && state?.country) {
           const version = state.version === 'v6' ? 'v6' : 'v4';
           const country = String(state.country || '').trim();
-          const maxUsersInput = String(text || '').trim();
-          const maxUsers = parseInt(maxUsersInput);
-          if (isNaN(maxUsers) || maxUsers < 0) { 
-            await tgSendMessage(env, chat_id, '❌ عدد نامعتبر است. لطفاً عدد صحیح 0 یا بیشتر ارسال کنید:'); 
-            return; 
-          }
-          // If this country already exists, append to that location using its existing flag
-          const existingFlag = await getExistingFlagForCountry(env, version, country);
-          if (existingFlag) {
-            const countBefore = await countAvailableDns(env, version);
-            const added = await putDnsAddresses(env, version, state.ips, country, existingFlag, uid, maxUsers);
-            const countAfter = countBefore + added;
-            await clearUserState(env, uid);
-            await tgSendMessage(env, chat_id, `✅ به لوکیشن موجود اضافه شد.
-نسخه: ${version.toUpperCase()}
-لوکیشن: ${existingFlag} ${country}
-تعداد افزوده‌شده: ${fmtNum(added)}
-حداکثر کاربر هر آدرس: ${maxUsers === 0 ? 'نامحدود' : fmtNum(maxUsers)}
-موجودی قبل: ${fmtNum(countBefore)} | موجودی فعلی: ${fmtNum(countAfter)}`);
-            return;
-          }
-          // Otherwise ask for a flag to create a new location group
+          const maxUsers = parseNonNegativeInt(text);
+          if (!Number.isFinite(maxUsers)) { await tgSendMessage(env, chat_id, 'عدد نامعتبر است. یک عدد صحیح یا "نامحدود" ارسال کنید:'); return; }
           await setUserState(env, uid, { step: 'adm_dns_add_flag', version, ips: state.ips, country, maxUsers });
           await tgSendMessage(env, chat_id, 'پرچم/ایموجی لوکیشن را ارسال کنید (مثال: 🇺🇸). برای پیشفرض "🌐"، همان را ارسال کنید.');
           return;
@@ -2815,7 +2816,8 @@ async function onMessage(msg, env) {
           return;
         }
         if (state?.step === 'file_set_limit_wait' && state?.token) {
-          const maxUsers = Number((text || '').replace(/[^0-9]/g, ''));
+          const maxUsers = parseNonNegativeInt(text);
+          if (!Number.isFinite(maxUsers)) { await tgSendMessage(env, chat_id, '❌ عدد نامعتبر است. یک عدد صحیح یا "نامحدود" ارسال کنید:'); return; }
           const key = CONFIG.FILE_PREFIX + state.token;
           const meta = await kvGet(env, key);
           if (!meta) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'فایل یافت نشد.'); return; }
