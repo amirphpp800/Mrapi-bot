@@ -1253,6 +1253,12 @@ function htmlEscape(s) {
   return s.replace(/[&<>"'\/]/g, (c) => HTML_ESCAPE_MAP[c] || c); 
 }
 
+// Minimal MarkdownV2 escaper for Telegram
+function mdv2Escape(s) {
+  const str = String(s == null ? '' : s);
+  return str.replace(/([_\*\[\]\(\)~`>#+\-=|{}\.!])/g, '\\$1');
+}
+
 // WireGuard helpers: generate a valid-looking base64 private key (32 bytes)
 function bytesToBase64(bytes) {
   let bin = '';
@@ -3040,12 +3046,13 @@ async function onCallback(cb, env) {
       ]);
       const parts = [];
       parts.push('👤 حساب کاربری');
-      parts.push(`آیدی: <code>${uid}</code>`);
-      parts.push(`نام: <b>${htmlEscape(u?.name || '-')}</b>`);
-      parts.push(`موجودی: <b>${bal} ${CONFIG.DEFAULT_CURRENCY}</b>`);
-      parts.push(`نسخه ربات: <b>${htmlEscape(ver)}</b>`);
+      parts.push(`آیدی: \`${mdv2Escape(uid)}\``);
+      parts.push(`نام: *${mdv2Escape(u?.name || '-') }*`);
+      parts.push(`موجودی: *${mdv2Escape(bal + ' ' + CONFIG.DEFAULT_CURRENCY)}*`);
+      parts.push(`نسخه ربات: *${mdv2Escape(ver)}*`);
       const txt = parts.join('\n');
-      await tgSendMessage(env, chat_id, txt, kbAcc);
+      const kbAccMd = { ...kbAcc, parse_mode: 'MarkdownV2' };
+      await tgSendMessage(env, chat_id, txt, kbAccMd);
       await tgAnswerCallbackQuery(env, cb.id);
       return;
     }
