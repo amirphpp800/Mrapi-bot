@@ -5518,7 +5518,13 @@ async function groupDnsAvailabilityByCountry(env, version) {
       const list = await env.BOT_KV.list({ prefix, limit: 1000, cursor });
       for (const k of list.keys) {
         const v = await kvGet(env, k.name);
-        if (!v || v.assigned_to) continue;
+        if (!v) continue;
+        // Skip entries that are fully used (respect capacity)
+        const maxUsers = Number(v.max_users || 0);
+        const usedCount = Number(v.used_count || 0);
+        if (maxUsers > 0 && usedCount >= maxUsers) continue;
+        // Skip entries that are hard-assigned to a single user (single-use)
+        if (v.assigned_to) continue;
         const c = v.country || 'نامشخص';
         if (!map[c]) map[c] = { count: 0, flag: v.flag || '🌐' };
         map[c].count += 1;
