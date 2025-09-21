@@ -2420,7 +2420,19 @@ async function onMessage(msg, env) {
           s.plans = plans;
           await setSettings(env, s);
           await clearUserState(env, uid);
-          await tgSendMessage(env, chat_id, '✅ پلن افزوده شد.', mainMenuInlineKb());
+          // Send refreshed plans list to confirm change
+          const rows = [];
+          for (let i = 0; i < plans.length; i++) {
+            const p = plans[i];
+            rows.push([
+              { text: `${i + 1}) ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} — ${p.price_label}`, callback_data: `adm_plan_edit:${i}` },
+              { text: '🗑 حذف', callback_data: `adm_plan_del:${i}` }
+            ]);
+          }
+          rows.push([{ text: '➕ افزودن پلن', callback_data: 'adm_plan_add' }]);
+          rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_basic' }]);
+          rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+          await tgSendMessage(env, chat_id, '✅ پلن افزوده شد.\nمدیریت پلن‌های سکه:', kb(rows));
           return;
         }
         // Admin: Plans — edit coins
@@ -2428,14 +2440,32 @@ async function onMessage(msg, env) {
           const coins = Number(String(text || '').replace(/[^0-9]/g, ''));
           if (!coins || coins <= 0) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد مثبت ارسال کنید:'); return; }
           const s = await getSettings(env);
-          const plans = Array.isArray(s?.plans) ? s.plans : [];
+          let plans = Array.isArray(s?.plans) ? s.plans : [];
+          // If plans are empty, initialize from CONFIG and persist to avoid invalid index
+          if (!plans.length && Array.isArray(CONFIG.PLANS) && CONFIG.PLANS.length) {
+            plans = JSON.parse(JSON.stringify(CONFIG.PLANS));
+            s.plans = plans;
+            await setSettings(env, s);
+          }
           const idx = Number(state.idx);
           if (!(idx >= 0 && idx < plans.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ پلن نامعتبر.'); return; }
           plans[idx].coins = coins;
           s.plans = plans;
           await setSettings(env, s);
           await clearUserState(env, uid);
-          await tgSendMessage(env, chat_id, '✅ تعداد سکه پلن بروزرسانی شد.', mainMenuInlineKb());
+          // Send refreshed plans list
+          const rows = [];
+          for (let i = 0; i < plans.length; i++) {
+            const p = plans[i];
+            rows.push([
+              { text: `${i + 1}) ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} — ${p.price_label}`, callback_data: `adm_plan_edit:${i}` },
+              { text: '🗑 حذف', callback_data: `adm_plan_del:${i}` }
+            ]);
+          }
+          rows.push([{ text: '➕ افزودن پلن', callback_data: 'adm_plan_add' }]);
+          rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_basic' }]);
+          rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+          await tgSendMessage(env, chat_id, '✅ تعداد سکه پلن بروزرسانی شد.\nمدیریت پلن‌های سکه:', kb(rows));
           return;
         }
         // Admin: Plans — edit price label
@@ -2443,14 +2473,30 @@ async function onMessage(msg, env) {
           const price_label = String(text || '').trim();
           if (!price_label) { await tgSendMessage(env, chat_id, '❌ برچسب نامعتبر است. دوباره ارسال کنید:'); return; }
           const s = await getSettings(env);
-          const plans = Array.isArray(s?.plans) ? s.plans : [];
+          let plans = Array.isArray(s?.plans) ? s.plans : [];
+          if (!plans.length && Array.isArray(CONFIG.PLANS) && CONFIG.PLANS.length) {
+            plans = JSON.parse(JSON.stringify(CONFIG.PLANS));
+            s.plans = plans;
+            await setSettings(env, s);
+          }
           const idx = Number(state.idx);
           if (!(idx >= 0 && idx < plans.length)) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, '❌ پلن نامعتبر.'); return; }
           plans[idx].price_label = price_label;
           s.plans = plans;
           await setSettings(env, s);
           await clearUserState(env, uid);
-          await tgSendMessage(env, chat_id, '✅ برچسب قیمت پلن بروزرسانی شد.', mainMenuInlineKb());
+          const rows = [];
+          for (let i = 0; i < plans.length; i++) {
+            const p = plans[i];
+            rows.push([
+              { text: `${i + 1}) ${fmtNum(p.coins)} ${CONFIG.DEFAULT_CURRENCY} — ${p.price_label}`, callback_data: `adm_plan_edit:${i}` },
+              { text: '🗑 حذف', callback_data: `adm_plan_del:${i}` }
+            ]);
+          }
+          rows.push([{ text: '➕ افزودن پلن', callback_data: 'adm_plan_add' }]);
+          rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_basic' }]);
+          rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+          await tgSendMessage(env, chat_id, '✅ برچسب قیمت پلن بروزرسانی شد.\nمدیریت پلن‌های سکه:', kb(rows));
           return;
         }
         // Admin: DNS add flow — addresses list
@@ -4094,7 +4140,73 @@ ${flag} <b>${country}</b>
       if (data === 'adm_wg_defaults') {
         const s = await getSettings(env);
         const d = s.wg_defaults || {};
+        const mode = String((d.peer_public_mode || 'cloudflare')).toLowerCase();
         const rows = [
+          [{ text: `Address: ${d.address || '-'}`, callback_data: 'adm_wg_edit:address' }],
+          [{ text: `DNS: ${d.dns || '-'}`, callback_data: 'adm_wg_edit:dns' }],
+          [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
+          [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
+          [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
+          [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
+          [
+            { text: `${mode==='cloudflare' ? '✅ ' : ''}Cloudflare`, callback_data: 'adm_wg_mode:cloudflare' },
+            { text: `${mode==='endpoint' ? '✅ ' : ''}Endpoint`, callback_data: 'adm_wg_mode:endpoint' },
+            { text: `${mode==='custom' ? '✅ ' : ''}Custom`, callback_data: 'adm_wg_mode:custom' },
+          ],
+          [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
+          [{ text: '↩️ بازنشانی به پیش‌فرض‌ها', callback_data: 'adm_wg_reset' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, 'پیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data.startsWith('adm_wg_mode:')) {
+        const sel = String((data.split(':')[1] || '').toLowerCase());
+        if (!['cloudflare','endpoint','custom'].includes(sel)) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        const s = await getSettings(env);
+        s.wg_defaults = s.wg_defaults || {};
+        s.wg_defaults.peer_public_mode = sel;
+        await setSettings(env, s);
+        const d = (await getSettings(env)).wg_defaults || {};
+        const mode = String((d.peer_public_mode || 'endpoint')).toLowerCase();
+        const rows = [
+          [{ text: `Address: ${d.address || '-'}`, callback_data: 'adm_wg_edit:address' }],
+          [{ text: `DNS: ${d.dns || '-'}`, callback_data: 'adm_wg_edit:dns' }],
+          [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
+          [{ text: `ListenPort: ${d.listen_port || '(auto)'}`, callback_data: 'adm_wg_edit:listen_port' }],
+          [{ text: `AllowedIPs: ${d.allowed_ips || '-'}`, callback_data: 'adm_wg_edit:allowed_ips' }],
+          [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
+          [
+            { text: `${mode==='cloudflare' ? '✅ ' : ''}Cloudflare`, callback_data: 'adm_wg_mode:cloudflare' },
+            { text: `${mode==='endpoint' ? '✅ ' : ''}Endpoint`, callback_data: 'adm_wg_mode:endpoint' },
+            { text: `${mode==='custom' ? '✅ ' : ''}Custom`, callback_data: 'adm_wg_mode:custom' },
+          ],
+          [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
+          [{ text: '↩️ بازنشانی به پیش‌فرض‌ها', callback_data: 'adm_wg_reset' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, 'پیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'ذخیره شد');
+        return;
+      }
+      if (data === 'adm_wg_reset') {
+        const s = await getSettings(env);
+        s.wg_defaults = {
+          address: '10.66.66.2/32',
+          dns: '10.202.10.10, 10.202.10.11',
+          mtu: 1360,
+          peer_public_mode: 'cloudflare',
+          peer_public_key: '',
+          listen_port: '',
+          allowed_ips: '0.0.0.0/11',
+          persistent_keepalive: undefined,
+        };
+        await setSettings(env, s);
+        const d = s.wg_defaults;
+        await tgEditMessage(env, chat_id, mid, '✅ به پیش‌فرض‌ها بازنشانی شد.\nپیشفرض‌های WireGuard — برای ویرایش یکی را انتخاب کنید:', kb([
           [{ text: `Address: ${d.address || '-'}`, callback_data: 'adm_wg_edit:address' }],
           [{ text: `DNS: ${d.dns || '-'}`, callback_data: 'adm_wg_edit:dns' }],
           [{ text: `MTU: ${d.mtu ?? '-'}`, callback_data: 'adm_wg_edit:mtu' }],
@@ -4105,22 +4217,23 @@ ${flag} <b>${country}</b>
           [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_wg_vars' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
-        ];
-        await tgEditMessage(env, chat_id, mid, 'مقادیر پیش‌فرض WireGuard — برای ویرایش یکی را انتخاب کنید:', kb(rows));
-        await tgAnswerCallbackQuery(env, cb.id);
+        ]));
+        await tgAnswerCallbackQuery(env, cb.id, 'بازنشانی شد');
         return;
       }
       if (data.startsWith('adm_wg_edit:')) {
         const field = data.split(':')[1];
         await setUserState(env, uid, { step: 'adm_wg_edit', field });
         let prompt = 'مقدار جدید را ارسال کنید:';
+        if (field === 'address') prompt = 'آدرس اینترفیس را با CIDR ارسال کنید — مثال: 10.66.66.2/32';
+        if (field === 'dns') prompt = 'DNSها را با کاما جدا کنید — مثال: 10.202.10.10, 10.202.10.11';
         if (field === 'mtu') prompt = 'مقدار MTU را ارسال کنید (عدد) — مثال: 1360';
         if (field === 'listen_port') prompt = 'ListenPort را ارسال کنید. برای حالت خودکار، پیام خالی یا 0 بفرستید.';
-        if (field === 'address') prompt = 'Address را ارسال کنید — مثال: 10.66.66.2/32';
-        if (field === 'dns') prompt = 'DNS را ارسال کنید — مثال: 10.202.10.10, 10.202.10.11';
-        if (field === 'allowed_ips') prompt = 'AllowedIPs را ارسال کنید — مثال: 0.0.0.0/11';
-        if (field === 'peer_public_mode') prompt = 'حالت PublicKey را ارسال کنید: cloudflare | endpoint | custom';
-        if (field === 'peer_public_key') prompt = 'PublicKey اختصاصی سرور را بفرستید (Base64)';
+        if (field === 'allowed_ips') prompt = 'AllowedIPs را ارسال کنید — مثال: 0.0.0.0/0, ::/0';
+        if (field === 'persistent_keepalive') prompt = 'PersistentKeepalive را بر حسب ثانیه ارسال کنید. برای خاموش کردن 0 یا پیام خالی بفرستید.';
+        if (field === 'peer_public_mode') prompt = 'حالت PublicKey را مشخص کنید: cloudflare | endpoint | custom';
+        if (field === 'peer_public_key') prompt = 'کلید عمومی سرور را (Base64) ارسال کنید. فقط در حالت custom استفاده می‌شود.';
+        await tgAnswerCallbackQuery(env, cb.id);
         await tgSendMessage(env, chat_id, prompt);
         await tgAnswerCallbackQuery(env, cb.id);
         return;
@@ -4715,17 +4828,23 @@ ${flag} <b>${country}</b>
           '• از بکاپ‌های تهیه شده برای بازیابی استفاده کنید',
           '• لاگ‌های خطا را در کنسول بررسی کنید',
         ];
-        await tgEditMessage(env, chat_id, mid, lines.join('\n'), kb([
+        const helpText = lines.join('\n');
+        const helpKb = kb([
           [{ text: '📊 آمار سیستم', callback_data: 'adm_stats' }],
           [{ text: '🧰 بکاپ سریع', callback_data: 'adm_backup' }],
           [{ text: '🔙 بازگشت به منو', callback_data: 'back_main' }]
-        ]));
+        ]);
+        const edited = await tgEditMessage(env, chat_id, mid, helpText, helpKb);
+        // If edit failed (e.g., message not editable), send as a new message
+        if (!edited || edited.ok === false) {
+          await tgSendMessage(env, chat_id, helpText, helpKb);
+        }
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
       if (data === 'adm_backup') {
         try {
-          await tgAnswerCallbackQuery(env, cb.id, '✨ در حال تهیه بکاپ زیبا...');
+          await tgAnswerCallbackQuery(env, cb.id, '✨ در حال تهیه بکاپ ...');
           
           // Use the beautiful backup function instead of raw backup
           const pretty = await buildPrettyBackup(env);
