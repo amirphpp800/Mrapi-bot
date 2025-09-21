@@ -203,22 +203,32 @@ function renderWgAdminPage(settings, notice = '') {
   @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;600&display=swap');
   :root { --bg: #0f172a; --card: rgba(255,255,255,0.08); --text: #e5e7eb; --sub:#94a3b8; --ok:#34d399; --warn:#fbbf24; --bad:#f87171; }
   *{ box-sizing:border-box; }
-  body{ margin:0; font-family:'Vazirmatn',sans-serif; background:#000; color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
-  .container{ width:100%; max-width:1000px; }
+  body{ margin:0; font-family:'Vazirmatn',sans-serif; background:#000; color:var(--text); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:16px; }
+  .container{ width:100%; max-width:1100px; }
   header{ text-align:center; margin-bottom:24px; }
   h1{ font-weight:600; margin:0 0 6px; }
   p{ margin:0; color:var(--sub); }
   .grid{ display:grid; grid-template-columns:1fr; gap:16px; }
   .card{ background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); border-radius:16px; padding:16px; backdrop-filter: blur(10px); box-shadow:0 10px 30px rgba(0,0,0,0.6); }
   .notice{ color:#34d399; margin:0 0 10px; }
-  table{ width:100%; border-collapse:collapse; }
+  .table-wrap{ width:100%; overflow:auto; }
+  table{ width:100%; border-collapse:collapse; min-width:640px; }
   th,td{ border:1px solid rgba(255,255,255,0.12); padding:8px; text-align:left; }
   code{ background:rgba(255,255,255,0.08); padding:2px 4px; border-radius:4px; }
   form .row{ display:flex; gap:8px; flex-wrap:wrap; }
   textarea,input,select,button{ width:100%; border-radius:10px; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.06); color:#fff; padding:8px 10px; }
+  /* Force dark dropdown for select (Peer Public Mode) */
+  select{ background:#0b0b0b; color:#fff; }
+  select option{ background:#000; color:#fff; }
   button{ background:#3b82f6; border:0; cursor:pointer; width:auto; }
-  .tabs{ display:flex; gap:8px; margin-bottom:8px; }
-  .tab{ padding:8px 12px; border-radius:10px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.12); display:inline-block; }
+  .tabs{ display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+  .tab{ padding:8px 12px; border-radius:10px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.12); display:inline-block; cursor:pointer; user-select:none; }
+  .tab.active{ background:#3b82f6; border-color:#60a5fa; }
+  .hidden{ display:none; }
+  @media (max-width: 640px){
+    .row > label{ flex:1 1 100% !important; }
+    table{ min-width:520px; }
+  }
 </style></head>
 <body>
  <main class="container">
@@ -229,9 +239,10 @@ function renderWgAdminPage(settings, notice = '') {
   <section class="card">
     ${notice ? `<div class="notice">${notice}</div>` : ''}
     <div class="tabs">
-      <div class="tab">Endpoints</div>
-      <div class="tab">WireGuard Defaults</div>
+      <div class="tab active" id="tab-btn-endpoints">Endpoints</div>
+      <div class="tab" id="tab-btn-defaults">WireGuard Defaults</div>
     </div>
+    <div id="tab-endpoints">
     <h2 style="margin-top:0;">افزودن Endpoint ها</h2>
     <form method="post">
       <input type="hidden" name="action" value="add" />
@@ -247,8 +258,17 @@ function renderWgAdminPage(settings, notice = '') {
       </div>
       <p><button type="submit">ثبت</button></p>
     </form>
+    <div class="table-wrap">
+    <h2 style="margin-top:0;">فهرست Endpoint ها</h2>
+    <table>
+      <thead><tr><th>#</th><th>Host:Port</th><th>کشور</th><th>پرچم</th><th>استفاده/حداکثر</th><th>اقدام</th></tr></thead>
+      <tbody>${rows || ''}</tbody>
+    </table>
+    </div>
+    </div>
+    <div id="tab-defaults" class="hidden">
   </section>
-  <section class="card">
+  <section class="card" style="margin-top:16px;">
     <h2 style="margin-top:0;">ویرایش پیش‌فرض‌های WireGuard</h2>
     <form method="post">
       <input type="hidden" name="action" value="save_defaults" />
@@ -279,15 +299,27 @@ function renderWgAdminPage(settings, notice = '') {
       <p><button type="submit">💾 ذخیره</button></p>
       <p style="color:#94a3b8; font-size:12px;">تنظیمات با زدن دکمه ذخیره اعمال می‌شوند. بدون ذخیره هیچ تغییری اعمال نخواهد شد.</p>
     </form>
-  </section>
-  <section class="card">
-    <h2 style="margin-top:0;">فهرست Endpoint ها</h2>
-    <table>
-      <thead><tr><th>#</th><th>Host:Port</th><th>کشور</th><th>پرچم</th><th>استفاده/حداکثر</th><th>اقدام</th></tr></thead>
-      <tbody>${rows || ''}</tbody>
-    </table>
-  </section>
- </main>
+    </div>
+  <script>
+    (function(){
+      const btnE = document.getElementById('tab-btn-endpoints');
+      const btnD = document.getElementById('tab-btn-defaults');
+      const tabE = document.getElementById('tab-endpoints');
+      const tabD = document.getElementById('tab-defaults');
+      function act(which){
+        if (which==='e'){
+          btnE.classList.add('active'); btnD.classList.remove('active');
+          tabE.classList.remove('hidden'); tabD.classList.add('hidden');
+        } else {
+          btnD.classList.add('active'); btnE.classList.remove('active');
+          tabD.classList.remove('hidden'); tabE.classList.add('hidden');
+        }
+      }
+      btnE && btnE.addEventListener('click', () => act('e'));
+      btnD && btnD.addEventListener('click', () => act('d'));
+    })();
+  </script>
+  </main>
 </body></html>`;
     return html;
   } catch (e) {
@@ -4213,11 +4245,36 @@ ${flag} <b>${country}</b>
           '✏️ برای ویرایش به پنل وب مراجعه کنید: /admin/wg',
         ].join('\n');
         const rows = [
+          [{ text: '🔄 بروزرسانی', callback_data: 'adm_wg_refresh' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_advanced' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
         await tgEditMessage(env, chat_id, mid, txt, kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_wg_refresh') {
+        const s = await getSettings(env);
+        const d = s.wg_defaults || {};
+        const txt = [
+          '⚙️ پیش‌فرض‌های WireGuard (فقط نمایش):',
+          `📍 Address: ${formatWgDefaultValue('address', d.address)}`,
+          `🌐 DNS: ${formatWgDefaultValue('dns', d.dns)}`,
+          `📏 MTU: ${formatWgDefaultValue('mtu', d.mtu)}`,
+          `🔌 ListenPort: ${formatWgDefaultValue('listen_port', d.listen_port)}`,
+          `🛡 AllowedIPs: ${formatWgDefaultValue('allowed_ips', d.allowed_ips)}`,
+          `⏰ PersistentKeepalive: ${formatWgDefaultValue('persistent_keepalive', d.persistent_keepalive)}`,
+          `🔑 Custom PublicKey: ${formatWgDefaultValue('peer_public_key', d.peer_public_key)}`,
+          '',
+          '✏️ برای ویرایش به پنل وب مراجعه کنید: /admin/wg',
+        ].join('\n');
+        const rows = [
+          [{ text: '🔄 بروزرسانی', callback_data: 'adm_wg_refresh' }],
+          [{ text: '🔙 بازگشت', callback_data: 'adm_advanced' }],
+          [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
+        ];
+        await tgEditMessage(env, chat_id, mid, txt, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id, 'به‌روز شد');
         return;
       }
       if (data === 'adm_wg_defaults' || data.startsWith('adm_wg_mode:') || data === 'adm_wg_reset' || data.startsWith('adm_wg_edit:')) {
