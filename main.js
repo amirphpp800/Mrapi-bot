@@ -1866,7 +1866,8 @@ async function onMessage(msg, env) {
     } catch {}
 
     // Mandatory join check
-    const joined = await ensureJoinedChannels(env, uid, chat_id);
+    const isAdmMsg = isAdminUser(env, uid);
+    const joined = isAdmMsg ? true : await ensureJoinedChannels(env, uid, chat_id);
     if (!joined) return; // A join prompt has been shown
 
     // دستورات متنی
