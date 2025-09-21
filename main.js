@@ -1865,15 +1865,15 @@ async function onMessage(msg, env) {
       }
     } catch {}
 
-    // Mandatory join check
-    const isAdmMsg = isAdminUser(env, uid);
-    const joined = isAdmMsg ? true : await ensureJoinedChannels(env, uid, chat_id);
-    if (!joined) return; // A join prompt has been shown
-
     // دستورات متنی
     const text = msg.text || msg.caption || '';
-    // Fetch state for WG filename flow (avoid name clash with later 'state')
+    // Fetch state early (used to bypass join check for admin WG edit)
     const st = await getUserState(env, uid);
+
+    // Mandatory join check (bypass for admins and during WG admin edit step)
+    const isAdmMsg = isAdminUser(env, uid) || (st?.step === 'adm_wg_edit');
+    const joined = isAdmMsg ? true : await ensureJoinedChannels(env, uid, chat_id);
+    if (!joined) return; // A join prompt has been shown
     // User: WireGuard — ask for filename and send .conf (by country, random endpoint)
     if (st?.step === 'ps_wg_name' && (typeof st?.ep_idx === 'number' || st?.country)) {
       const name = String(text || '').trim();
