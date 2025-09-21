@@ -20,7 +20,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '4.1-optimized + Ai',
+  BOT_VERSION: '4.2-optimized + Ai',
   
   // Performance settings
   MAX_CACHE_SIZE: 1000,
@@ -563,7 +563,11 @@ async function getBotVersion(env) {
 // ------------------ Build main menu header text ------------------ //
 async function mainMenuHeader(env) {
   const v = await getBotVersion(env);
-  return `منو اصلی:\nنسخه ربات: ${v}`;
+  // Use explicit join to ensure reliable newline rendering across parse modes
+  return [
+    'منو اصلی:',
+    `نسخه ربات: ${v}`
+  ].join('\n');
 }
 
 // Get bot info (for auto-detecting username if BOT_USERNAME is not set)
@@ -736,10 +740,9 @@ function validateInput(input, type, maxLength = null) {
 // Sanitize input to prevent injection attacks
 function sanitizeInput(input) {
   if (typeof input !== 'string') return input;
-  return input
-    .replace(/[<>"'&]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  // Do not strip HTML/Markdown characters; our bot constructs trusted templates.
+  // Only remove unsafe control characters while preserving newlines and tabs.
+  return input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
 }
 
 async function kvGet(env, key, type = 'json') {
@@ -2056,8 +2059,11 @@ async function onMessage(msg, env) {
             return;
           }
           await setSettings(env, s);
+          // Re-fetch to confirm persisted values and show back to admin
+          const fresh = await getSettings(env);
+          const cur = fresh?.wg_defaults || {};
           await clearUserState(env, uid);
-          await tgSendMessage(env, chat_id, '✅ ذخیره شد.', kb([[{ text: '🔙 بازگشت', callback_data: 'adm_wg_defaults' }]]));
+          await tgSendMessage(env, chat_id, `✅ ذخیره شد.\nمقدار فعلی ${field}: ${String(cur[field] ?? '-')}`, kb([[{ text: '🔙 بازگشت', callback_data: 'adm_wg_defaults' }]]));
           return;
         }
         await tgSendMessage(env, chat_id, 'لطفاً فایل .ovpn را به صورت سند (Document) ارسال کنید.');
@@ -2483,7 +2489,7 @@ async function onMessage(msg, env) {
           if (existingFlag) {
             const countBefore = await countAvailableDns(env, version);
             const added = await putDnsAddresses(env, version, state.ips, country, existingFlag, uid, maxUsers);
-            const countAfter = await countAvailableDns(env, version);
+            const countAfter = countBefore + added;
             await clearUserState(env, uid);
             await tgSendMessage(env, chat_id, `✅ به لوکیشن موجود اضافه شد.
 نسخه: ${version.toUpperCase()}
@@ -2506,7 +2512,8 @@ async function onMessage(msg, env) {
           const maxUsers = Number(state.maxUsers || 0);
           const countBefore = await countAvailableDns(env, version);
           const added = await putDnsAddresses(env, version, state.ips, country, flag, uid, maxUsers);
-          const countAfter = await countAvailableDns(env, version);
+          // Avoid immediate recount due to KV eventual consistency
+          const countAfter = countBefore + added;
           await clearUserState(env, uid);
           await tgSendMessage(env, chat_id, `✅ افزودن انجام شد.
 نسخه: ${version.toUpperCase()}
@@ -3049,7 +3056,6 @@ async function onCallback(cb, env) {
       parts.push(`آیدی: \`${mdv2Escape(uid)}\``);
       parts.push(`نام: *${mdv2Escape(u?.name || '-') }*`);
       parts.push(`موجودی: *${mdv2Escape(bal + ' ' + CONFIG.DEFAULT_CURRENCY)}*`);
-      parts.push(`نسخه ربات: *${mdv2Escape(ver)}*`);
       const txt = parts.join('\n');
       const kbAccMd = { ...kbAcc, parse_mode: 'MarkdownV2' };
       await tgSendMessage(env, chat_id, txt, kbAccMd);
@@ -4077,11 +4083,10 @@ ${flag} <b>${country}</b>
         const epsCount = Array.isArray(s?.wg_endpoints) ? s.wg_endpoints.length : 0;
         const rows = [
           [{ text: '✏️ ویرایش مقادیر پیش‌فرض', callback_data: 'adm_wg_defaults' }],
-          [{ text: `🛰 مدیریت Endpoint ها (${fmtNum(epsCount)})`, callback_data: 'adm_wg_eps' }],
           [{ text: '🔙 بازگشت', callback_data: 'adm_advanced' }],
           [{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
-        await tgEditMessage(env, chat_id, mid, 'WireGuard — یک بخش را انتخاب کنید:', kb(rows));
+        await tgEditMessage(env, chat_id, mid, 'پیشفرض‌های WireGuard — یکی را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
         return;
       }
@@ -5427,12 +5432,22 @@ async function getSettings(env) {
       wg_endpoints: []
     };
     
-    // Merge with defaults
+    // Merge with defaults (shallow for most, deep for wg_defaults)
     let changed = false;
     for (const [key, defaultValue] of Object.entries(defaults)) {
+      if (key === 'wg_defaults') continue; // handle below with deep merge
       if (s[key] === undefined || (Array.isArray(defaultValue) && !Array.isArray(s[key]))) {
         s[key] = defaultValue;
         changed = true;
+      }
+    }
+    // Deep-merge wg_defaults to ensure edited fields persist while filling missing ones
+    if (!s.wg_defaults || typeof s.wg_defaults !== 'object') {
+      s.wg_defaults = { ...defaults.wg_defaults };
+      changed = true;
+    } else {
+      for (const [k, v] of Object.entries(defaults.wg_defaults)) {
+        if (s.wg_defaults[k] === undefined) { s.wg_defaults[k] = v; changed = true; }
       }
     }
     
