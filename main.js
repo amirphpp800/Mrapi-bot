@@ -20,7 +20,7 @@
 const CONFIG = {
   // Bot token and admin IDs are read from env: env.BOT_TOKEN (required), env.ADMIN_ID or env.ADMIN_IDS
   BOT_NAME: 'ربات آپلود',
-  BOT_VERSION: '4.2-optimized + Ai',
+  BOT_VERSION: '4.3-optimized + Ai',
   
   // Performance settings
   MAX_CACHE_SIZE: 1000,
@@ -2036,8 +2036,8 @@ async function onMessage(msg, env) {
           return;
         }
         // Admin: WireGuard defaults editing (generic)
-        if (state?.step === 'adm_wg_edit' && state?.field) {
-          const field = String(state.field);
+        if (st?.step === 'adm_wg_edit' && st?.field) {
+          const field = String(st.field);
           const valRaw = String(text || '').trim();
           const valNumRaw = normalizeDigits(valRaw);
           const s = await getSettings(env);
