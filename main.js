@@ -746,6 +746,16 @@ function sanitizeInput(input) {
   return input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
 }
 
+// Normalize Persian/Arabic digits to ASCII digits
+function normalizeDigits(str) {
+  if (typeof str !== 'string') return str;
+  const map = {
+    '۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9',
+    '٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9'
+  };
+  return str.replace(/[۰-۹٠-٩]/g, d => map[d] || d);
+}
+
 async function kvGet(env, key, type = 'json') {
   if (!validateInput(key, 'string', 256)) {
     console.error('kvGet: Invalid key format', key);
@@ -2029,14 +2039,15 @@ async function onMessage(msg, env) {
         if (state?.step === 'adm_wg_edit' && state?.field) {
           const field = String(state.field);
           const valRaw = String(text || '').trim();
+          const valNumRaw = normalizeDigits(valRaw);
           const s = await getSettings(env);
           s.wg_defaults = s.wg_defaults || {};
           if (field === 'mtu') {
-            const v = Number(valRaw.replace(/[^0-9]/g, ''));
+            const v = Number(valNumRaw.replace(/[^0-9]/g, ''));
             if (!Number.isFinite(v) || v <= 0) { await tgSendMessage(env, chat_id, '❌ مقدار نامعتبر است. یک عدد صحیح ارسال کنید:'); return; }
             s.wg_defaults.mtu = v;
           } else if (field === 'listen_port') {
-            const v = Number(valRaw.replace(/[^0-9]/g, ''));
+            const v = Number(valNumRaw.replace(/[^0-9]/g, ''));
             s.wg_defaults.listen_port = v || undefined;
           } else if (field === 'address') {
             s.wg_defaults.address = valRaw;
@@ -2045,7 +2056,7 @@ async function onMessage(msg, env) {
           } else if (field === 'allowed_ips') {
             s.wg_defaults.allowed_ips = valRaw;
           } else if (field === 'persistent_keepalive') {
-            const v = Number(valRaw.replace(/[^0-9]/g, ''));
+            const v = Number(valNumRaw.replace(/[^0-9]/g, ''));
             s.wg_defaults.persistent_keepalive = (v && v > 0) ? v : undefined;
           } else if (field === 'peer_public_mode') {
             const mode = valRaw.toLowerCase();
@@ -4150,7 +4161,7 @@ ${flag} <b>${country}</b>
           [{ text: `PersistentKeepalive: ${d.persistent_keepalive ? d.persistent_keepalive : 'خاموش'}`, callback_data: 'adm_wg_edit:persistent_keepalive' }],
           [
             { text: `${mode==='cloudflare' ? '✅ ' : ''}Cloudflare`, callback_data: 'adm_wg_mode:cloudflare' },
-            { text: `${mode==='endpoint' ? '✅ ' : ''}Endpoint`, callback_data: 'adm_wg_mode:endpoint' },
+            { text: `${mode==='endpoint' ? '✅ ' : ''}Auto Key`, callback_data: 'adm_wg_mode:endpoint' },
             { text: `${mode==='custom' ? '✅ ' : ''}Custom`, callback_data: 'adm_wg_mode:custom' },
           ],
           [{ text: `Custom PublicKey: ${d.peer_public_key ? '…' : '-'}`, callback_data: 'adm_wg_edit:peer_public_key' }],
@@ -5181,7 +5192,8 @@ async function getWgServerPublicKey(env, ep) {
   try {
     const s = await getSettings(env);
     const d = s?.wg_defaults || {};
-    const mode = (d.peer_public_mode || '').toLowerCase();
+    // Default to cloudflare if not set to ensure a PublicKey is always provided
+    const mode = (d.peer_public_mode || 'cloudflare').toLowerCase();
     if (mode === 'cloudflare') {
       // Cloudflare public key requested by user
       return 'bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=';
