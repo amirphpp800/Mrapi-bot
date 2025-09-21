@@ -3032,17 +3032,19 @@ async function onCallback(cb, env) {
     if (data === 'account') {
       const u = await getUser(env, uid);
       const bal = fmtNum(u?.balance || 0);
+      const ver = await getBotVersion(env);
       const kbAcc = kb([
         [ { text: '🆘 پشتیبانی', url: 'https://t.me/NeoDebug' }, { text: '🎫 ارسال تیکت', callback_data: 'ticket_new' } ],
         [ { text: '📦 کانفیگ‌های من', callback_data: 'my_configs' } ],
         [ { text: '🔙 بازگشت', callback_data: 'back_main' } ]
       ]);
-      const txt = [
-        '👤 حساب کاربری',
-        `آیدی: <code>${uid}</code>`,
-        `نام: <b>${htmlEscape(u?.name || '-')}</b>`,
-        `موجودی: <b>${bal} ${CONFIG.DEFAULT_CURRENCY}</b>`,
-      ].join('\n');
+      const parts = [];
+      parts.push('👤 حساب کاربری');
+      parts.push(`آیدی: <code>${uid}</code>`);
+      parts.push(`نام: <b>${htmlEscape(u?.name || '-')}</b>`);
+      parts.push(`موجودی: <b>${bal} ${CONFIG.DEFAULT_CURRENCY}</b>`);
+      parts.push(`نسخه ربات: <b>${htmlEscape(ver)}</b>`);
+      const txt = parts.join('\n');
       await tgSendMessage(env, chat_id, txt, kbAcc);
       await tgAnswerCallbackQuery(env, cb.id);
       return;
@@ -4161,11 +4163,41 @@ ${flag} <b>${country}</b>
       if (data === 'adm_dns_remove') {
         const rows = [
           [ { text: 'IPv4', callback_data: 'adm_dns_remove_v4' }, { text: 'IPv6', callback_data: 'adm_dns_remove_v6' } ],
+          [ { text: '🧹 حذف تمام DNS‌ها', callback_data: 'adm_dns_remove_all' } ],
           [ { text: '🔙 بازگشت', callback_data: 'adm_service' } ],
           [ { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' } ],
         ];
         await tgEditMessage(env, chat_id, mid, '🗑 حذف آدرس‌های DNS\nنوع را انتخاب کنید:', kb(rows));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_remove_all') {
+        const rows = [
+          [ { text: '✅ بله، ادامه', callback_data: 'adm_dns_remove_all_c1' } ],
+          [ { text: '❌ انصراف', callback_data: 'adm_dns_remove' } ],
+        ];
+        await tgEditMessage(env, chat_id, mid, '⚠️ آیا از حذف همه DNS ها مطمئن هستید؟', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_remove_all_c1') {
+        const rows = [
+          [ { text: '🛑 بله، می‌دانم غیرقابل بازگشت است', callback_data: 'adm_dns_remove_all_c2' } ],
+          [ { text: '❌ انصراف', callback_data: 'adm_dns_remove' } ],
+        ];
+        await tgEditMessage(env, chat_id, mid, '❗️ این عملیات غیرقابل بازگشت است و همه آدرس‌های DNS (IPv4 و IPv6) حذف خواهند شد.', kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      if (data === 'adm_dns_remove_all_c2') {
+        // Acknowledge first to avoid spinner during mass deletion
+        await tgAnswerCallbackQuery(env, cb.id, 'در حال حذف...');
+        const removed = await deleteAllDns(env);
+        const rows = [
+          [ { text: '🔙 بازگشت', callback_data: 'adm_dns_remove' } ],
+          [ { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' } ],
+        ];
+        await tgEditMessage(env, chat_id, mid, `✅ عملیات انجام شد.\nتعداد حذف شده: <b>${fmtNum(removed)}</b>`, kb(rows));
         return;
       }
       if (data === 'adm_dns_remove_v4' || data === 'adm_dns_remove_v6') {
@@ -5153,6 +5185,26 @@ async function deleteDnsByCountry(env, version, country) {
     }
     return removed;
   } catch (e) { console.error('deleteDnsByCountry error', e); return 0; }
+}
+
+// Delete ALL DNS entries (both IPv4 and IPv6). Returns total removed
+async function deleteAllDns(env) {
+  try {
+    let removed = 0;
+    for (const ver of ['v4', 'v6']) {
+      const prefix = dnsPrefix(ver);
+      let cursor = undefined;
+      do {
+        const list = await env.BOT_KV.list({ prefix, limit: 1000, cursor });
+        for (const k of list.keys) {
+          const ok = await kvDel(env, k.name);
+          if (ok) removed++;
+        }
+        cursor = list.cursor;
+      } while (cursor);
+    }
+    return removed;
+  } catch (e) { console.error('deleteAllDns error', e); return 0; }
 }
 
 // Group availability by country, preserving a representative flag
