@@ -565,8 +565,9 @@ async function mainMenuHeader(env) {
   const v = await getBotVersion(env);
   // Use explicit join to ensure reliable newline rendering across parse modes
   return [
-    'منو اصلی:',
-    `نسخه ربات: ${v}`
+    'منو اصلی 🏠',
+    'نسخه ربات 👇',
+    `${v}`
   ].join('\n');
 }
 
@@ -5114,7 +5115,12 @@ async function countAvailableDns(env, version) {
       const list = await env.BOT_KV.list({ prefix, limit: 1000, cursor });
       for (const k of list.keys) {
         const v = await kvGet(env, k.name);
-        if (v && !v.assigned_to) cnt++;
+        if (v) {
+          const maxUsers = Number(v.max_users || 0);
+          const usedCount = Number(v.used_count || 0);
+          // Available if unlimited (0) or capacity not reached
+          if (maxUsers === 0 || usedCount < maxUsers) cnt++;
+        }
       }
       cursor = list.cursor;
     } while (cursor);
@@ -5134,7 +5140,7 @@ async function allocateDnsForUser(env, uid, version) {
       for (const k of list.keys) {
         const key = k.name;
         const v = await kvGet(env, key);
-        if (!v || v.assigned_to) continue;
+        if (!v) continue;
         
         // Check if this IP has reached max users limit
         const maxUsers = Number(v.max_users || 0);
@@ -5146,10 +5152,17 @@ async function allocateDnsForUser(env, uid, version) {
           continue;
         }
         
-        // Assign to user and increment used count
-        v.assigned_to = String(uid);
-        v.assigned_at = nowTs();
-        v.used_count = usedCount + 1;
+        // Assign based on capacity mode
+        if (maxUsers === 1) {
+          // Single-use: lock to user and optionally delete after
+          v.assigned_to = String(uid);
+          v.assigned_at = nowTs();
+          v.used_count = usedCount + 1;
+        } else {
+          // Multi-use or unlimited: do NOT lock to a single user
+          // Just increase usage counter
+          v.used_count = usedCount + 1;
+        }
         
         const ok = await kvSet(env, key, v);
         if (ok) {
@@ -5255,7 +5268,11 @@ async function countAvailableDnsByCountry(env, version, country) {
       const list = await env.BOT_KV.list({ prefix, limit: 1000, cursor });
       for (const k of list.keys) {
         const v = await kvGet(env, k.name);
-        if (v && !v.assigned_to && String(v.country || '') === String(country || '')) cnt++;
+        if (v && String(v.country || '') === String(country || '')) {
+          const maxUsers = Number(v.max_users || 0);
+          const usedCount = Number(v.used_count || 0);
+          if (maxUsers === 0 || usedCount < maxUsers) cnt++;
+        }
       }
       cursor = list.cursor;
     } while (cursor);
@@ -5420,6 +5437,7 @@ async function getSettings(env) {
       ovpn_flags: CONFIG.OVPN_FLAGS,
       card_info: CONFIG.CARD_INFO,
       support_url: 'https://t.me/NeoDebug',
+      bot_version: CONFIG.BOT_VERSION,
       wg_defaults: {
         address: '10.66.66.2/32',
         dns: '10.202.10.10, 10.202.10.11',
