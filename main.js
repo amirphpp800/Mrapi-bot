@@ -35,6 +35,7 @@ const CONFIG = {
   GIFT_PREFIX: 'gift:',
   REDEEM_PREFIX: 'redeem:',
   REF_DONE_PREFIX: 'ref:done:',
+  REF_PENDING_PREFIX: 'ref:pending:',
   PURCHASE_PREFIX: 'purchase:',
   BLOCK_PREFIX: 'blocked:',
   // Custom purchasable buttons
@@ -3040,6 +3041,7 @@ async function onCallback(cb, env) {
     const joined = isAdm ? true : await ensureJoinedChannels(env, uid, chat_id);
     if (!joined && data !== 'join_check' && !data.startsWith('confirm_buy') && data !== 'cancel_buy') {
       await tgAnswerCallbackQuery(env, cb.id, 'ابتدا عضو کانال‌ها شوید');
+      return;
     }
 
     if (data === 'join_check') {
@@ -3048,12 +3050,25 @@ async function onCallback(cb, env) {
         // پس از تایید عضویت، اگر معرف ذخیره شده است، یکبار سکه به معرف بده
         try {
           const u = await getUser(env, uid);
-          const ref = u?.referrer_id;
+          let ref = u?.referrer_id;
+          // اگر referrer در پروفایل نبود، از pending KV بازیابی کن
+          if (!ref) {
+            try {
+              const pend = await kvGet(env, CONFIG.REF_PENDING_PREFIX + String(uid));
+              if (pend?.referrer_id) {
+                ref = String(pend.referrer_id);
+                // در صورت نبود، همانجا در پروفایل هم ذخیره کن تا بعداً در دسترس باشد
+                if (u && !u.referrer_id) { u.referrer_id = ref; await setUser(env, uid, u); }
+              }
+            } catch {}
+          }
           if (ref && String(ref) !== String(uid)) {
             const credited = await autoCreditReferralIfNeeded(env, String(ref), String(uid));
             if (credited) {
               try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید تایید شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
               try { const uu = await getUser(env, uid); if (uu) { uu.referral_pending = false; await setUser(env, uid, uu); } } catch {}
+              // پاک کردن pending KV تا دوباره اعتباردهی نشود
+              try { await kvDel(env, CONFIG.REF_PENDING_PREFIX + String(uid)); } catch {}
             }
           }
         } catch {}
@@ -5133,6 +5148,8 @@ async function sendWelcome(chat_id, uid, env, msg) {
           await setUser(env, uid, u);
         }
       } catch {}
+      // همچنین برای اطمینان، referrer را به صورت pending در KV ذخیره کن تا در join_check نیز قابل بازیابی باشد
+      try { await kvSet(env, CONFIG.REF_PENDING_PREFIX + String(uid), { referrer_id: String(ref), ts: nowTs() }); } catch {}
     }
     // Force join if needed
     const joined = await ensureJoinedChannels(env, uid, chat_id);
@@ -5149,6 +5166,21 @@ async function sendWelcome(chat_id, uid, env, msg) {
         try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید ثبت شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
         try { const u = await getUser(env, uid); if (u) { u.referral_pending = false; await setUser(env, uid, u); } } catch {}
       }
+    }
+    // Fallback: اگر کاربر از قبل referrer_id ذخیره شده داشت ولی اکنون بدون پارامتر start وارد شد، بعد از تایید عضویت اعتباردهی را انجام بده
+    else {
+      try {
+        const u = await getUser(env, uid);
+        const savedRef = u?.referrer_id;
+        const pending = u?.referral_pending;
+        if (savedRef && String(savedRef) !== String(uid) && pending !== false) {
+          const ok2 = await autoCreditReferralIfNeeded(env, String(savedRef), String(uid));
+          if (ok2) {
+            try { await tgSendMessage(env, String(savedRef), `🎉 یک زیرمجموعه جدید ثبت شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
+            try { if (u) { u.referral_pending = false; await setUser(env, uid, u); } } catch {}
+          }
+        }
+      } catch {}
     }
     // اگر /start <token> بود، ابتدا جریان دریافت با تایید کسر سکه را اجرا کن
     if (startToken) {
