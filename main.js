@@ -3051,27 +3051,36 @@ async function onCallback(cb, env) {
         try {
           const u = await getUser(env, uid);
           let ref = u?.referrer_id;
+          console.log(`[DEBUG] join_check for uid=${uid}, profile_ref=${ref}`);
+          
           // اگر referrer در پروفایل نبود، از pending KV بازیابی کن
           if (!ref) {
             try {
               const pend = await kvGet(env, CONFIG.REF_PENDING_PREFIX + String(uid));
+              console.log(`[DEBUG] pending KV for uid=${uid}:`, pend);
               if (pend?.referrer_id) {
                 ref = String(pend.referrer_id);
+                console.log(`[DEBUG] found pending ref=${ref} for uid=${uid}`);
                 // در صورت نبود، همانجا در پروفایل هم ذخیره کن تا بعداً در دسترس باشد
                 if (u && !u.referrer_id) { u.referrer_id = ref; await setUser(env, uid, u); }
               }
-            } catch {}
+            } catch (e) { console.log(`[DEBUG] pending KV error:`, e); }
           }
+          
           if (ref && String(ref) !== String(uid)) {
+            console.log(`[DEBUG] attempting credit: ref=${ref}, uid=${uid}`);
             const credited = await autoCreditReferralIfNeeded(env, String(ref), String(uid));
+            console.log(`[DEBUG] credit result: ${credited}`);
             if (credited) {
               try { await tgSendMessage(env, String(ref), `🎉 یک زیرمجموعه جدید تایید شد. 1 🪙 به حساب شما افزوده شد.`); } catch {}
               try { const uu = await getUser(env, uid); if (uu) { uu.referral_pending = false; await setUser(env, uid, uu); } } catch {}
               // پاک کردن pending KV تا دوباره اعتباردهی نشود
               try { await kvDel(env, CONFIG.REF_PENDING_PREFIX + String(uid)); } catch {}
             }
+          } else {
+            console.log(`[DEBUG] no valid ref found for uid=${uid}, ref=${ref}`);
           }
-        } catch {}
+        } catch (e) { console.log(`[DEBUG] join_check error:`, e); }
         const hdr = await mainMenuHeader(env);
         await tgEditMessage(env, chat_id, mid, `✅ عضویت شما تایید شد.\n${hdr}`, mainMenuKb(env, uid));
       } else {
