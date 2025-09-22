@@ -368,6 +368,39 @@ async function buildDnsDeleteListKb(env, version, country, page = 1) {
   return kb(rows);
 }
 
+// Build a keyboard to list all OVPN configs for deletion (admin)
+async function buildOvpnDeleteListKb(env) {
+  const rows = [];
+  try {
+    const list = await env.BOT_KV.list({ prefix: CONFIG.OVPN_PREFIX, limit: 1000 });
+    const items = [];
+    for (const k of list.keys) {
+      const name = k.name || '';
+      if (!name.startsWith(CONFIG.OVPN_PREFIX)) continue;
+      const nm = name.slice(CONFIG.OVPN_PREFIX.length); // e.g., TCP:هلند
+      const parts = nm.split(':');
+      const proto = (parts[0] || '').toUpperCase();
+      const loc = parts.slice(1).join(':');
+      if (!proto || !loc) continue;
+      items.push({ proto, loc });
+    }
+    if (!items.length) {
+      rows.push([{ text: 'هیچ کانفیگ OVPN آپلود نشده است', callback_data: 'noop' }]);
+    } else {
+      for (const it of items) {
+        const label = `${it.proto} — ${it.loc}`;
+        rows.push([{ text: label, callback_data: `adm_ovpn_del_item:${it.proto}:${it.loc}` }]);
+      }
+    }
+  } catch (e) {
+    console.error('buildOvpnDeleteListKb error', e);
+    rows.push([{ text: 'خطا در دریافت لیست', callback_data: 'noop' }]);
+  }
+  rows.push([{ text: '🔙 بازگشت', callback_data: 'adm_service' }]);
+  rows.push([{ text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }]);
+  return kb(rows);
+}
+
 // Deliver custom button content to user with payment check
 async function deliverCustomButtonToUser(env, uid, chat_id, id) {
   try {
@@ -4068,8 +4101,8 @@ ${flag} <b>${country}</b>
           [{ text: '🆔 آیدی پشتیبانی', callback_data: 'adm_support' }, { text: `🚫 دکمه‌های غیرفعال (${disabledCount})`, callback_data: 'adm_buttons' }],
           // Row: DNS management
           [{ text: '➕ افزودن DNS', callback_data: 'adm_dns_add' }, { text: '🗑 حذف DNS', callback_data: 'adm_dns_remove' }],
-          // Row: OVPN upload (single action row)
-          [{ text: '📥 آپلود OVPN', callback_data: 'adm_ovpn_upload' }],
+          // Row: OVPN management (upload + delete)
+          [{ text: '📥 آپلود OVPN', callback_data: 'adm_ovpn_upload' }, { text: '🗑 حذف OVPN', callback_data: 'adm_ovpn_delete' }],
           // Row: Back actions
           [{ text: '🔙 بازگشت', callback_data: 'admin' }, { text: '🏠 منوی اصلی ربات', callback_data: 'back_main' }],
         ];
@@ -4577,6 +4610,42 @@ ${flag} <b>${country}</b>
       if (data === 'adm_ovpn_upload') {
         await tgEditMessage(env, chat_id, mid, 'آپلود اوپن وی پی ان\nابتدا پروتکل را انتخاب کنید:', ovpnProtocolKb('adm_'));
         await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+
+      // Admin: OpenVPN delete flow — list all entries
+      if (data === 'adm_ovpn_delete') {
+        await tgAnswerCallbackQuery(env, cb.id, 'در حال بارگذاری...');
+        await tgEditMessage(env, chat_id, mid, 'حذف کانفیگ‌های OpenVPN — یکی را انتخاب کنید:', await buildOvpnDeleteListKb(env));
+        return;
+      }
+      // Admin: OpenVPN delete flow — ask confirm for a specific item
+      if (data.startsWith('adm_ovpn_del_item:')) {
+        const parts = data.split(':');
+        const proto = (parts[1] || '').toUpperCase();
+        const loc = parts.slice(2).join(':');
+        if (!['TCP','UDP'].includes(proto) || !loc) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        const key = CONFIG.OVPN_PREFIX + `${proto}:${loc}`;
+        const meta = await kvGet(env, key);
+        if (!meta || !meta.file_id) { await tgAnswerCallbackQuery(env, cb.id, 'یافت نشد'); return; }
+        const rows = [
+          [ { text: '✅ تایید حذف', callback_data: `adm_ovpn_del_confirm:${proto}:${loc}` } ],
+          [ { text: '🔙 بازگشت', callback_data: 'adm_ovpn_delete' } ],
+        ];
+        await tgEditMessage(env, chat_id, mid, `❗️ حذف کانفیگ ${loc} (${proto}) — آیا مطمئن هستید؟`, kb(rows));
+        await tgAnswerCallbackQuery(env, cb.id);
+        return;
+      }
+      // Admin: OpenVPN delete flow — perform deletion
+      if (data.startsWith('adm_ovpn_del_confirm:')) {
+        const parts = data.split(':');
+        const proto = (parts[1] || '').toUpperCase();
+        const loc = parts.slice(2).join(':');
+        if (!['TCP','UDP'].includes(proto) || !loc) { await tgAnswerCallbackQuery(env, cb.id, 'نامعتبر'); return; }
+        const key = CONFIG.OVPN_PREFIX + `${proto}:${loc}`;
+        await kvDel(env, key);
+        await tgAnswerCallbackQuery(env, cb.id, 'حذف شد');
+        await tgEditMessage(env, chat_id, mid, `🗑 کانفیگ ${loc} (${proto}) حذف شد.`, await buildOvpnDeleteListKb(env));
         return;
       }
       if (data.startsWith('adm_ovpn_proto:')) {
