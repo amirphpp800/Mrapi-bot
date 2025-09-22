@@ -38,6 +38,8 @@ const CONFIG = {
   REF_PENDING_PREFIX: 'ref:pending:',
   PURCHASE_PREFIX: 'purchase:',
   BLOCK_PREFIX: 'blocked:',
+  // Tester users (always allowed to test referral multiple times)
+  TESTER_IDS: ['6519017272'],
   // Custom purchasable buttons
   CUSTOMBTN_PREFIX: 'cbtn:',
   // پرداخت و پلن‌ها (می‌توانید از طریق تنظیمات نیز override کنید)
@@ -731,9 +733,14 @@ async function getBotUsername(env) {
 async function autoCreditReferralIfNeeded(env, referrerId, referredId) {
   try {
     if (!referrerId || !referredId || String(referrerId) === String(referredId)) return false;
+    const isTesterReferrer = Array.isArray(CONFIG.TESTER_IDS) && CONFIG.TESTER_IDS.includes(String(referrerId));
+    const isTesterReferred = Array.isArray(CONFIG.TESTER_IDS) && CONFIG.TESTER_IDS.includes(String(referredId));
     const doneKey = CONFIG.REF_DONE_PREFIX + String(referredId);
-    const done = await kvGet(env, doneKey);
-    if (done) return false; // already credited once
+    // Only enforce the once-only rule if neither side is a tester
+    if (!isTesterReferrer && !isTesterReferred) {
+      const done = await kvGet(env, doneKey);
+      if (done) return false; // already credited once
+    }
     // Ensure referrer user exists so crediting won't fail
     try { await ensureUser(env, String(referrerId), {}); } catch {}
     const amount = 1; // grant 1 coin to referrer
@@ -742,7 +749,10 @@ async function autoCreditReferralIfNeeded(env, referrerId, referredId) {
     // bump referrer counter
     const ru = await getUser(env, String(referrerId));
     if (ru) { ru.ref_count = Number(ru.ref_count || 0) + 1; await setUser(env, String(referrerId), ru); }
-    await kvSet(env, doneKey, { ts: nowTs(), amount, referrer_id: String(referrerId) });
+    // Only set done marker if not in tester mode, so tester can repeat
+    if (!isTesterReferrer && !isTesterReferred) {
+      await kvSet(env, doneKey, { ts: nowTs(), amount, referrer_id: String(referrerId) });
+    }
     return true;
   } catch (e) { console.error('autoCreditReferralIfNeeded error', e); return false; }
 }
@@ -5199,18 +5209,27 @@ async function sendWelcome(chat_id, uid, env, msg) {
     const hdr = await mainMenuHeader(env);
     await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
-
+}
 function extractReferrerFromStartParam(msg) {
   try {
     const text = msg.text || msg.caption || '';
-    // /start REF
+    // /start <param>
     const parts = text.trim().split(/\s+/);
     if (parts[0] === '/start' && parts[1]) {
-      const p = parts[1];
-      // حالت 1: کاملاً عددی
+      const p = String(parts[1]).trim();
+      // اگر پارامتر یک توکن فایل ۶ کاراکتری باشد، معرف نیست
+      if (/^[A-Za-z0-9]{6}$/.test(p)) return '';
+
+      // حالت 1: کاملاً عددی (آیدی کاربر)
       if (/^\d+$/.test(p)) return p;
-      // حالت 2: الگوهای رایج مثل ref_123456 یا ref123456 یا هر رشته‌ای که شامل یک توالی عددی طولانی باشد
-      const m = String(p).match(/(\d{5,})/);
+
+      // حالت 2: فرمت‌های رایج معرفی: ref:123456، ref_123456، ref123456، r123456، u123456
+      // در صورتی که ارقام انتهایی ۵ رقم یا بیشتر باشند (مطابق آیدی‌های تلگرام)
+      let m = p.match(/^(?:ref[:_]?|r|u)?-?(\d{5,})$/i);
+      if (m && m[1]) return m[1];
+
+      // حالت 3: هر رشته‌ای که شامل یک دنباله عددی ۵ رقم به بالا باشد
+      m = p.match(/(\d{5,})/);
       if (m && m[1]) return m[1];
     }
     return '';
@@ -6327,5 +6346,5 @@ function renderStatusPage(settings, stats, envSummary = {}) {
 </body>
 </html>`;
 }
-// 11) Expose app via global (avoid ESM export for Wrangler)
+// 11) Expose app via global (for Wrangler/Pages)
 globalThis.APP = { fetch: routerFetch };
