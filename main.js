@@ -5190,14 +5190,20 @@ async function sendWelcome(chat_id, uid, env, msg) {
     const hdr = await mainMenuHeader(env);
     await tgSendMessage(env, chat_id, hdr, mainMenuKb(env, uid));
   } catch (e) { console.error('sendWelcome error', e); }
-}
 
 function extractReferrerFromStartParam(msg) {
   try {
     const text = msg.text || msg.caption || '';
     // /start REF
     const parts = text.trim().split(/\s+/);
-    if (parts[0] === '/start' && parts[1] && /^\d+$/.test(parts[1])) return parts[1];
+    if (parts[0] === '/start' && parts[1]) {
+      const p = parts[1];
+      // حالت 1: کاملاً عددی
+      if (/^\d+$/.test(p)) return p;
+      // حالت 2: الگوهای رایج مثل ref_123456 یا ref123456 یا هر رشته‌ای که شامل یک توالی عددی طولانی باشد
+      const m = String(p).match(/(\d{5,})/);
+      if (m && m[1]) return m[1];
+    }
     return '';
   } catch { return ''; }
 }
