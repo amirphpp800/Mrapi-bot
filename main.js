@@ -33,6 +33,7 @@ const CONFIG = {
   TICKET_PREFIX: 'ticket:',
   DOWNLOAD_LOG_PREFIX: 'dl:',
   GIFT_PREFIX: 'gift:',
+  CLAIM_PREFIX: 'claim:',
   REDEEM_PREFIX: 'redeem:',
   REF_DONE_PREFIX: 'ref:done:',
   REF_PENDING_PREFIX: 'ref:pending:',
@@ -472,39 +473,74 @@ async function deliverFileToUser(env, uid, chat_id, token) {
   try {
     // Serialize capacity and payment updates to prevent race conditions
     const updated = await withLock('file:' + token, async () => {
-      const meta = await kvGet(env, CONFIG.FILE_PREFIX + token);
+      let meta = await kvGet(env, CONFIG.FILE_PREFIX + token);
       if (!meta || meta.disabled) {
         await tgSendMessage(env, chat_id, 'فایل یافت نشد یا غیرفعال است.');
         return { ok: false };
       }
-      const users = Array.isArray(meta.users) ? meta.users : [];
-      const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
+      const users = Array.isArray(meta.users) ? [...meta.users] : [];
+      const paidUsers = Array.isArray(meta.paid_users) ? [...meta.paid_users] : [];
       const maxUsers = Number(meta.max_users || 0);
       const price = Number(meta.price || 0);
       const isOwner = String(meta.owner_id) === String(uid);
-      const already = users.includes(String(uid));
-      const alreadyPaid = paidUsers.includes(String(uid));
-      if (!already && maxUsers > 0 && users.length >= maxUsers) {
-        await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
-        return { ok: false };
+      const uidStr = String(uid);
+      const already = users.includes(uidStr);
+      const alreadyPaid = paidUsers.includes(uidStr);
+      // Enforce capacity by deterministic claim list (first N claimants win)
+      if (!already && maxUsers > 0) {
+        const claimKey = CONFIG.CLAIM_PREFIX + token + ':' + uidStr;
+        let claim = await kvGet(env, claimKey);
+        if (!claim) {
+          claim = { uid: uidStr, ts: nowTs() };
+          await kvSet(env, claimKey, claim);
+        }
+        // Build claimant list
+        const list = await env.BOT_KV.list({ prefix: CONFIG.CLAIM_PREFIX + token + ':' });
+        const items = [];
+        for (const k of list.keys) {
+          const v = await kvGet(env, k.name);
+          if (v && v.uid) items.push(v);
+        }
+        items.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+        const winners = new Set(items.slice(0, maxUsers).map(x => String(x.uid)));
+        if (!winners.has(uidStr)) {
+          await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
+          return { ok: false };
+        }
       }
-      // Charge if needed (non-owner and not paid yet)
+      // Now handle payment if needed, ensuring idempotency
       if (price > 0 && !isOwner && !alreadyPaid) {
-        const u = await getUser(env, String(uid));
+        const u = await getUser(env, uidStr);
         if (!u || Number(u.balance || 0) < price) {
+          // Not enough balance: fail
           await tgSendMessage(env, chat_id, 'موجودی شما برای دریافت فایل کافی نیست.', mainMenuInlineKb());
           return { ok: false };
         }
+        // Charge and mark paid
         u.balance = Number(u.balance || 0) - price;
-        await setUser(env, String(uid), u);
-        paidUsers.push(String(uid));
-        meta.paid_users = paidUsers;
+        await setUser(env, uidStr, u);
+        const paid = Array.isArray(meta.paid_users) ? meta.paid_users : [];
+        if (!paid.includes(uidStr)) paid.push(uidStr);
+        meta.paid_users = paid;
+        await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
       }
+      // Finally, add user to recipients if not already
       if (!already) {
-        users.push(String(uid));
-        meta.users = users;
+        const cur = Array.isArray(meta.users) ? meta.users : [];
+        if (!cur.includes(uidStr)) {
+          cur.push(uidStr);
+          meta.users = cur;
+          await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+        }
       }
-      await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+      // If capacity is now full, hard-disable the file to avoid any further deliveries via other instances
+      const afterUsers = Array.isArray(meta.users) ? meta.users : [];
+      if (maxUsers > 0 && afterUsers.length >= maxUsers) {
+        if (!meta.disabled) {
+          meta.disabled = true;
+          await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+        }
+      }
       return { ok: true, meta };
     });
     if (!updated.ok) return false;
@@ -1927,21 +1963,14 @@ async function handleFileDownload(request, env) {
       const alreadyPaid = paidUsers.includes(String(uid));
       // اگر کاربر قبلاً مجاز نشده است، هرگز از مسیر HTTP او را اضافه نکن
       // فقط به مالك یا کاربران از قبل مجاز اجازه دانلود بده
-      if (!already) {
-        // ظرفیت تکمیل شده؟
-        if (maxUsers > 0 && users.length >= maxUsers) {
-          return new Response('ظرفیت دریافت این فایل تکمیل شده است.', { status: 403 });
+      if (!already && !isOwner) {
+        // برای غیر مالک، همیشه به ربات هدایت کن تا محدودیت‌ها اعمال شود
+        const botUser = await getBotUsername(env);
+        if (botUser) {
+          const deep = `https://t.me/${botUser}?start=${token}`;
+          return Response.redirect(deep, 302);
         }
-        // اگر قیمت‌دار و هنوز پرداخت نشده یا حتی رایگان اما هنوز در ربات تایید نشده، به ربات هدایت کن
-        if (!isOwner && (!alreadyPaid || price >= 0)) {
-          const botUser = await getBotUsername(env);
-          if (botUser) {
-            const deep = `https://t.me/${botUser}?start=${token}`;
-            return Response.redirect(deep, 302);
-          }
-          return new Response('برای دریافت این فایل ابتدا به ربات مراجعه کنید.', { status: 402 });
-        }
-        // نکته: از مسیر HTTP هیچ به‌روزرسانی در لیست کاربران انجام نمی‌دهیم تا جعل uid باعث دور زدن محدودیت نشود
+        return new Response('برای دریافت این فایل ابتدا به ربات مراجعه کنید.', { status: 402 });
       }
     } catch (e) {
       console.error('pricing/limit enforcement error', e);
