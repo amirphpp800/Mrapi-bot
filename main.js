@@ -407,31 +407,40 @@ async function buildOvpnDeleteListKb(env) {
 // Deliver custom button content to user with payment check
 async function deliverCustomButtonToUser(env, uid, chat_id, id) {
   try {
-    const meta = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
-    if (!meta || meta.disabled) { await tgSendMessage(env, chat_id, 'این مورد یافت نشد یا غیرفعال است.', mainMenuInlineKb()); return false; }
-    const price = Number(meta.price || 0);
-    const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
-    const alreadyPaid = paidUsers.includes(String(uid));
-    const users = Array.isArray(meta.users) ? meta.users : [];
-    const alreadyReceived = users.includes(String(uid));
-    const maxUsers = Number(meta.max_users || 0);
-    if (!alreadyReceived && maxUsers > 0 && users.length >= maxUsers) {
-      await tgSendMessage(env, chat_id, 'ظرفیت دریافت این مورد تکمیل شده است.', mainMenuInlineKb());
-      return false;
-    }
-    if (price > 0 && !alreadyPaid) {
-      const u = await getUser(env, String(uid));
-      if (!u || Number(u.balance || 0) < price) {
-        await tgSendMessage(env, chat_id, `برای دریافت این مورد به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`, mainMenuInlineKb());
-        return false;
+    const result = await withLock('cbtn:' + id, async () => {
+      const meta = await kvGet(env, CONFIG.CUSTOMBTN_PREFIX + id);
+      if (!meta || meta.disabled) { await tgSendMessage(env, chat_id, 'این مورد یافت نشد یا غیرفعال است.', mainMenuInlineKb()); return { ok: false }; }
+      const price = Number(meta.price || 0);
+      const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
+      const alreadyPaid = paidUsers.includes(String(uid));
+      const users = Array.isArray(meta.users) ? meta.users : [];
+      const alreadyReceived = users.includes(String(uid));
+      const maxUsers = Number(meta.max_users || 0);
+      if (!alreadyReceived && maxUsers > 0 && users.length >= maxUsers) {
+        await tgSendMessage(env, chat_id, 'ظرفیت دریافت این مورد تکمیل شده است.', mainMenuInlineKb());
+        return { ok: false };
       }
-      // charge and mark paid
-      u.balance = Number(u.balance || 0) - price;
-      await setUser(env, String(uid), u);
-      paidUsers.push(String(uid));
-      meta.paid_users = paidUsers;
+      if (price > 0 && !alreadyPaid) {
+        const u = await getUser(env, String(uid));
+        if (!u || Number(u.balance || 0) < price) {
+          await tgSendMessage(env, chat_id, `برای دریافت این مورد به ${fmtNum(price)} ${CONFIG.DEFAULT_CURRENCY} نیاز دارید.`, mainMenuInlineKb());
+          return { ok: false };
+        }
+        // charge and mark paid
+        u.balance = Number(u.balance || 0) - price;
+        await setUser(env, String(uid), u);
+        paidUsers.push(String(uid));
+        meta.paid_users = paidUsers;
+      }
+      if (!alreadyReceived) {
+        users.push(String(uid));
+        meta.users = users;
+      }
       await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, meta);
-    }
+      return { ok: true, meta };
+    });
+    if (!result.ok) return false;
+    const meta = result.meta;
     // deliver
     const kind = meta.kind || 'document';
     if (kind === 'photo') {
@@ -441,11 +450,6 @@ async function deliverCustomButtonToUser(env, uid, chat_id, id) {
       await tgSendMessage(env, chat_id, `📄 محتوا:\n${content}`);
     } else {
       await tgSendDocument(env, chat_id, meta.file_id, { caption: `${kindIcon(kind)} ${meta.file_name || ''}` });
-    }
-    if (!alreadyReceived) {
-      users.push(String(uid));
-      meta.users = users;
-      await kvSet(env, CONFIG.CUSTOMBTN_PREFIX + id, meta);
     }
     return true;
   } catch (e) { console.error('deliverCustomButtonToUser error', e); await tgSendMessage(env, chat_id, 'خطا در ارسال محتوا.'); return false; }
@@ -466,40 +470,45 @@ function buildFileAdminKb(meta) {
 // ارسال فایل به کاربر با رعایت قوانین قیمت/محدودیت
 async function deliverFileToUser(env, uid, chat_id, token) {
   try {
-    const meta = await kvGet(env, CONFIG.FILE_PREFIX + token);
-    if (!meta || meta.disabled) {
-      await tgSendMessage(env, chat_id, 'فایل یافت نشد یا غیرفعال است.');
-      return false;
-    }
-    const users = Array.isArray(meta.users) ? meta.users : [];
-    const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
-    const maxUsers = Number(meta.max_users || 0);
-    const price = Number(meta.price || 0);
-    const isOwner = String(meta.owner_id) === String(uid);
-    const already = users.includes(String(uid));
-    const alreadyPaid = paidUsers.includes(String(uid));
-    if (!already && maxUsers > 0 && users.length >= maxUsers) {
-      await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
-      return false;
-    }
-    // در صورت قیمت‌دار بودن، فقط اگر قبلاً پرداخت نشده کسر کن
-    if (price > 0 && !isOwner && !alreadyPaid) {
-      const u = await getUser(env, String(uid));
-      if (!u || Number(u.balance || 0) < price) {
-        await tgSendMessage(env, chat_id, 'موجودی شما برای دریافت فایل کافی نیست.', mainMenuInlineKb());
-        return false;
+    // Serialize capacity and payment updates to prevent race conditions
+    const updated = await withLock('file:' + token, async () => {
+      const meta = await kvGet(env, CONFIG.FILE_PREFIX + token);
+      if (!meta || meta.disabled) {
+        await tgSendMessage(env, chat_id, 'فایل یافت نشد یا غیرفعال است.');
+        return { ok: false };
       }
-      u.balance = Number(u.balance || 0) - price;
-      await setUser(env, String(uid), u);
-      paidUsers.push(String(uid));
-      meta.paid_users = paidUsers;
+      const users = Array.isArray(meta.users) ? meta.users : [];
+      const paidUsers = Array.isArray(meta.paid_users) ? meta.paid_users : [];
+      const maxUsers = Number(meta.max_users || 0);
+      const price = Number(meta.price || 0);
+      const isOwner = String(meta.owner_id) === String(uid);
+      const already = users.includes(String(uid));
+      const alreadyPaid = paidUsers.includes(String(uid));
+      if (!already && maxUsers > 0 && users.length >= maxUsers) {
+        await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
+        return { ok: false };
+      }
+      // Charge if needed (non-owner and not paid yet)
+      if (price > 0 && !isOwner && !alreadyPaid) {
+        const u = await getUser(env, String(uid));
+        if (!u || Number(u.balance || 0) < price) {
+          await tgSendMessage(env, chat_id, 'موجودی شما برای دریافت فایل کافی نیست.', mainMenuInlineKb());
+          return { ok: false };
+        }
+        u.balance = Number(u.balance || 0) - price;
+        await setUser(env, String(uid), u);
+        paidUsers.push(String(uid));
+        meta.paid_users = paidUsers;
+      }
+      if (!already) {
+        users.push(String(uid));
+        meta.users = users;
+      }
       await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
-    }
-    if (!already) {
-      users.push(String(uid));
-      meta.users = users;
-      await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
-    }
+      return { ok: true, meta };
+    });
+    if (!updated.ok) return false;
+    const meta = updated.meta;
     // ارسال محتوا بر اساس نوع
     const kind = meta.kind || 'document';
     if (kind === 'photo') {
@@ -1007,6 +1016,24 @@ async function kvDel(env, key) {
 
 // Rate limiting for Telegram API
 const RATE_LIMITER = new Map();
+
+// Simple in-memory lock to serialize critical sections per key (best-effort within a single worker instance)
+const FILE_LOCKS = new Map();
+async function withLock(key, fn, timeoutMs = 5000) {
+  const start = Date.now();
+  while (true) {
+    if (!FILE_LOCKS.get(key)) {
+      FILE_LOCKS.set(key, true);
+      try {
+        return await fn();
+      } finally {
+        FILE_LOCKS.delete(key);
+      }
+    }
+    if (Date.now() - start > timeoutMs) throw new Error('lock_timeout_' + key);
+    await new Promise(r => setTimeout(r, 25));
+  }
+}
 
 function checkRateLimit(chatId, action = 'message') {
   const key = `${chatId}:${action}`;
