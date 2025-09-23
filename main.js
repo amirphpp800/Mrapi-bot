@@ -2345,6 +2345,13 @@ async function onMessage(msg, env) {
         await tgSendMessage(env, chat_id, '📝 عنوان دکمه را ارسال کنید:');
         return;
       }
+      // Admin upload flow (generic): allow plain text/link as a content type
+      if (isAdminUser(env, uid) && state?.step === 'adm_upload_wait_file') {
+        const tmp = { kind: 'text', text: String(text || '') };
+        await setUserState(env, uid, { step: 'adm_upload_price', tmp });
+        await tgSendMessage(env, chat_id, '💰 قیمت فایل به سکه را ارسال کنید (مثلاً 10):');
+        return;
+      }
       if (state?.step === 'giftcode_wait') {
         // Backward-compatible: treat like gift_redeem_wait
         const code = String((text||'').trim());
@@ -2378,7 +2385,8 @@ async function onMessage(msg, env) {
       if (isAdminUser(env, uid) && state?.step === 'adm_upload_price') {
         const amount = Number(text.replace(/[^0-9]/g, ''));
         const tmp = state.tmp || {};
-        if (!tmp.file_id) { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'خطا. دوباره تلاش کنید.'); return; }
+        // Accept media (with file_id) or plain text (kind === 'text')
+        if (!tmp.file_id && tmp.kind !== 'text') { await clearUserState(env, uid); await tgSendMessage(env, chat_id, 'خطا. دوباره تلاش کنید.'); return; }
         await setUserState(env, uid, { step: 'adm_upload_limit', tmp, price: amount >= 0 ? amount : 0 });
         await tgSendMessage(env, chat_id, '🔢 محدودیت تعداد دریافت‌کنندگان یکتا را ارسال کنید (مثلاً 2). برای بدون محدودیت 0 بفرستید:');
         return;
