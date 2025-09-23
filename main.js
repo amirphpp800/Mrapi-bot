@@ -1898,23 +1898,23 @@ async function handleFileDownload(request, env) {
       const isOwner = String(meta.owner_id) === String(uid);
       const already = users.includes(String(uid));
       const alreadyPaid = paidUsers.includes(String(uid));
-      if (!already && maxUsers > 0 && users.length >= maxUsers) {
-        return new Response('ظرفیت دریافت این فایل تکمیل شده است.', { status: 403 });
-      }
-      if (price > 0 && !isOwner && !alreadyPaid) {
-        // به جای کسر در این مسیر، کاربر را برای تایید به ربات هدایت کن
-        const botUser = await getBotUsername(env);
-        if (botUser) {
-          const deep = `https://t.me/${botUser}?start=${token}`;
-          return Response.redirect(deep, 302);
-        }
-        // اگر نام ربات را نداریم، با پیام خطا مواجه شویم
-        return new Response('برای دریافت این فایل ابتدا به ربات مراجعه کنید و تایید کنید.', { status: 402 });
-      }
+      // اگر کاربر قبلاً مجاز نشده است، هرگز از مسیر HTTP او را اضافه نکن
+      // فقط به مالك یا کاربران از قبل مجاز اجازه دانلود بده
       if (!already) {
-        users.push(String(uid));
-        meta.users = users;
-        await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+        // ظرفیت تکمیل شده؟
+        if (maxUsers > 0 && users.length >= maxUsers) {
+          return new Response('ظرفیت دریافت این فایل تکمیل شده است.', { status: 403 });
+        }
+        // اگر قیمت‌دار و هنوز پرداخت نشده یا حتی رایگان اما هنوز در ربات تایید نشده، به ربات هدایت کن
+        if (!isOwner && (!alreadyPaid || price >= 0)) {
+          const botUser = await getBotUsername(env);
+          if (botUser) {
+            const deep = `https://t.me/${botUser}?start=${token}`;
+            return Response.redirect(deep, 302);
+          }
+          return new Response('برای دریافت این فایل ابتدا به ربات مراجعه کنید.', { status: 402 });
+        }
+        // نکته: از مسیر HTTP هیچ به‌روزرسانی در لیست کاربران انجام نمی‌دهیم تا جعل uid باعث دور زدن محدودیت نشود
       }
     } catch (e) {
       console.error('pricing/limit enforcement error', e);
@@ -2422,7 +2422,7 @@ async function onMessage(msg, env) {
           price: price >= 0 ? price : 0,
           kind: tmp.kind || 'document',
           file_id: tmp.file_id,
-          file_name: tmp.file_name,
+          file_name: tmp.file_name || (tmp.kind === 'text' ? 'text' : (tmp.kind || 'file')),
           file_size: tmp.file_size,
           mime_type: tmp.mime_type,
           text: tmp.kind === 'text' ? (tmp.text || '') : undefined,
@@ -2507,7 +2507,7 @@ async function onMessage(msg, env) {
           owner_id: uid,
           kind: tmp.kind || 'document',
           file_id: tmp.file_id,
-          file_name: tmp.file_name,
+          file_name: tmp.file_name || (tmp.kind === 'text' ? 'text' : (tmp.kind || 'file')),
           file_size: tmp.file_size,
           mime_type: tmp.mime_type,
           text: tmp.kind === 'text' ? (tmp.text || '') : undefined,
