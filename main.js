@@ -486,27 +486,10 @@ async function deliverFileToUser(env, uid, chat_id, token) {
       const uidStr = String(uid);
       const already = users.includes(uidStr);
       const alreadyPaid = paidUsers.includes(uidStr);
-      // Enforce capacity by deterministic claim list (first N claimants win)
-      if (!already && maxUsers > 0) {
-        const claimKey = CONFIG.CLAIM_PREFIX + token + ':' + uidStr;
-        let claim = await kvGet(env, claimKey);
-        if (!claim) {
-          claim = { uid: uidStr, ts: nowTs() };
-          await kvSet(env, claimKey, claim);
-        }
-        // Build claimant list
-        const list = await env.BOT_KV.list({ prefix: CONFIG.CLAIM_PREFIX + token + ':' });
-        const items = [];
-        for (const k of list.keys) {
-          const v = await kvGet(env, k.name);
-          if (v && v.uid) items.push(v);
-        }
-        items.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-        const winners = new Set(items.slice(0, maxUsers).map(x => String(x.uid)));
-        if (!winners.has(uidStr)) {
-          await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
-          return { ok: false };
-        }
+      // Simple capacity check - if already at limit, reject immediately
+      if (!already && maxUsers > 0 && users.length >= maxUsers) {
+        await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
+        return { ok: false };
       }
       // Now handle payment if needed, ensuring idempotency
       if (price > 0 && !isOwner && !alreadyPaid) {
@@ -531,6 +514,25 @@ async function deliverFileToUser(env, uid, chat_id, token) {
           cur.push(uidStr);
           meta.users = cur;
           await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+          
+          // Double-check: if we exceeded capacity after adding, remove this user and fail
+          if (maxUsers > 0 && cur.length > maxUsers) {
+            meta.users = cur.filter(u => u !== uidStr);
+            await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+            // Refund if payment was made
+            if (price > 0 && !isOwner) {
+              const u = await getUser(env, uidStr);
+              if (u) {
+                u.balance = Number(u.balance || 0) + price;
+                await setUser(env, uidStr, u);
+                // Remove from paid users
+                meta.paid_users = (meta.paid_users || []).filter(p => p !== uidStr);
+                await kvSet(env, CONFIG.FILE_PREFIX + token, meta);
+              }
+            }
+            await tgSendMessage(env, chat_id, 'ظرفیت دریافت این فایل تکمیل شده است.', mainMenuInlineKb());
+            return { ok: false };
+          }
         }
       }
       // If capacity is now full, hard-disable the file to avoid any further deliveries via other instances
@@ -1055,7 +1057,7 @@ const RATE_LIMITER = new Map();
 
 // Simple in-memory lock to serialize critical sections per key (best-effort within a single worker instance)
 const FILE_LOCKS = new Map();
-async function withLock(key, fn, timeoutMs = 5000) {
+async function withLock(key, fn, timeoutMs = 10000) {
   const start = Date.now();
   while (true) {
     if (!FILE_LOCKS.get(key)) {
@@ -1067,7 +1069,7 @@ async function withLock(key, fn, timeoutMs = 5000) {
       }
     }
     if (Date.now() - start > timeoutMs) throw new Error('lock_timeout_' + key);
-    await new Promise(r => setTimeout(r, 25));
+    await new Promise(r => setTimeout(r, 10));
   }
 }
 
