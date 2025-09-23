@@ -2349,7 +2349,7 @@ async function onMessage(msg, env) {
         // Backward-compatible: treat like gift_redeem_wait
         const code = String((text||'').trim());
         const g = await kvGet(env, CONFIG.GIFT_PREFIX + code);
-        if (!g) { await tgSendMessage(env, chat_id, 'کد هدیه نامعتبر است.'); return; }
+        if (!g) { await tgSendMessage(env, chat_id, '❌ کد هدیه نامعتبر است.'); return; }
         const usedBy = Array.isArray(g.used_by) ? g.used_by : [];
         if (usedBy.includes(uid)) { await tgSendMessage(env, chat_id, 'شما قبلاً از این کد استفاده کرده‌اید.'); return; }
         const max = Number(g.max_uses || 0);
