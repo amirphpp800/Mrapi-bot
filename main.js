@@ -1961,10 +1961,18 @@ async function handleFileDownload(request, env) {
       const isOwner = String(meta.owner_id) === String(uid);
       const already = users.includes(String(uid));
       const alreadyPaid = paidUsers.includes(String(uid));
-      // اگر کاربر قبلاً مجاز نشده است، هرگز از مسیر HTTP او را اضافه نکن
-      // فقط به مالك یا کاربران از قبل مجاز اجازه دانلود بده
-      if (!already && !isOwner) {
-        // برای غیر مالک، همیشه به ربات هدایت کن تا محدودیت‌ها اعمال شود
+      // اگر فایل محدودیت دارد، همه (غیر از مالک) باید از ربات عبور کنند
+      if (!isOwner && maxUsers > 0) {
+        // برای فایل‌های محدود، همیشه به ربات هدایت کن
+        const botUser = await getBotUsername(env);
+        if (botUser) {
+          const deep = `https://t.me/${botUser}?start=${token}`;
+          return Response.redirect(deep, 302);
+        }
+        return new Response('برای دریافت این فایل ابتدا به ربات مراجعه کنید.', { status: 402 });
+      }
+      // اگر قیمت‌دار است و پرداخت نشده، به ربات هدایت کن
+      if (!isOwner && price > 0 && !alreadyPaid) {
         const botUser = await getBotUsername(env);
         if (botUser) {
           const deep = `https://t.me/${botUser}?start=${token}`;
