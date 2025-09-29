@@ -178,6 +178,37 @@ function pickWgEndpointWithCapacity(list, country) {
   return arr[r];
 }
 
+// WireGuard: random IPv4 generator from CIDR (e.g., 192.168.1.0/24)
+function ipToInt(ip) {
+  const p = String(ip || '').trim().split('.').map(x => Number(x));
+  if (p.length !== 4 || p.some(x => !Number.isInteger(x) || x < 0 || x > 255)) return null;
+  return ((p[0] << 24) >>> 0) + (p[1] << 16) + (p[2] << 8) + p[3];
+}
+function intToIp(int) {
+  int = int >>> 0;
+  return [ (int >>> 24) & 255, (int >>> 16) & 255, (int >>> 8) & 255, int & 255 ].join('.');
+}
+function randomIPv4FromCIDR(cidr) {
+  try {
+    const [ip, maskStr] = String(cidr || '').trim().split('/');
+    const mask = Number(maskStr);
+    if (!ip || !(mask >= 0 && mask <= 32)) return null;
+    const base = ipToInt(ip);
+    if (base === null) return null;
+    const hostBits = 32 - mask;
+    if (hostBits <= 0) return ip; // single IP
+    const size = (1 << hostBits) >>> 0;
+    const start = (base >>> 0) & (~((1 << hostBits) - 1)) >>> 0;
+    const end = (start + size - 1) >>> 0;
+    let minHost = start, maxHost = end;
+    if (hostBits >= 2) { minHost = start + 1; maxHost = end - 1; }
+    if (maxHost < minHost) return intToIp(start);
+    const span = (maxHost - minHost + 1) >>> 0;
+    const rnd = Math.floor(Math.random() * span);
+    return intToIp((minHost + rnd) >>> 0);
+  } catch { return null; }
+}
+
 // Simple Web Admin page for WireGuard Endpoints management
 function renderWgAdminPage(settings, notice = '') {
   try {
@@ -287,6 +318,18 @@ function renderWgAdminPage(settings, notice = '') {
       </div>
       <div class="row">
         <label style="flex:1 1 100%">AllowedIPs<br/><input name="allowed_ips" placeholder="0.0.0.0/0, ::/0" value="${d.allowed_ips || ''}" /></label>
+      </div>
+      <div class="row">
+        <label style="flex:1 1 60%">CIDR Pool برای IP تصادفی<br/>
+          <input name="cidr_pool" placeholder="10.66.0.0/16" value="${d.cidr_pool || ''}" />
+        </label>
+        <label style="flex:1 1 40%">اعمال به:
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding-top:6px;">
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" name="cidr_apply_dns" ${d.cidr_apply_dns ? 'checked' : ''}/> DNS</label>
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" name="cidr_apply_address" ${d.cidr_apply_address ? 'checked' : ''}/> Address</label>
+            <label style="display:flex; align-items:center; gap:6px;"><input type="checkbox" name="cidr_apply_endpoint" ${d.cidr_apply_endpoint ? 'checked' : ''}/> Endpoint</label>
+          </div>
+        </label>
       </div>
       <div class="row">
         <label style="flex:1 1 50%">Peer Public Mode<br/>
@@ -2083,8 +2126,34 @@ async function onMessage(msg, env) {
       const lines = [];
       lines.push('[Interface]');
       lines.push(`PrivateKey = ${priv}`);
-      if (d.address) lines.push(`Address = ${d.address}`);
-      if (d.dns) lines.push(`DNS = ${d.dns}`);
+      // CIDR logic: random IP per config based on toggles
+      let endpointHostport = ep.hostport;
+      let addressLine = d.address || '';
+      let dnsLine = d.dns || '';
+      let cidrIp = null; let cidrMask = null;
+      if (d.cidr_pool && typeof d.cidr_pool === 'string') {
+        const parts = d.cidr_pool.split('/');
+        if (parts.length === 2) {
+          cidrMask = parts[1];
+          const rnd = randomIPv4FromCIDR(d.cidr_pool);
+          if (rnd) cidrIp = rnd;
+        }
+      }
+      if (cidrIp) {
+        if (d.cidr_apply_address && cidrMask) addressLine = `${cidrIp}/${cidrMask}`;
+        if (d.cidr_apply_dns) dnsLine = cidrIp;
+        if (d.cidr_apply_endpoint) {
+          const lastColon = String(ep.hostport || '').lastIndexOf(':');
+          if (lastColon > 0) {
+            const port = ep.hostport.slice(lastColon + 1);
+            endpointHostport = `${cidrIp}:${port}`;
+          } else {
+            endpointHostport = cidrIp;
+          }
+        }
+      }
+      if (addressLine) lines.push(`Address = ${addressLine}`);
+      if (dnsLine) lines.push(`DNS = ${dnsLine}`);
       if (d.mtu) lines.push(`MTU = ${d.mtu}`);
       if (d.listen_port) lines.push(`ListenPort = ${d.listen_port}`);
       lines.push('');
@@ -2097,7 +2166,7 @@ async function onMessage(msg, env) {
       if (typeof d.persistent_keepalive === 'number' && d.persistent_keepalive >= 1 && d.persistent_keepalive <= 99) {
         lines.push(`PersistentKeepalive = ${d.persistent_keepalive}`);
       }
-      lines.push(`Endpoint = ${ep.hostport}`);
+      lines.push(`Endpoint = ${endpointHostport}`);
       const cfg = lines.join('\n');
       const filename = `${name}.conf`;
       try {
@@ -6297,6 +6366,10 @@ async function routerFetch(request, env, ctx) {
               const lpStr = String(formData.get('listen_port') || '').trim();
               const pkStr = String(formData.get('persistent_keepalive') || '').trim();
               const allowed = String(formData.get('allowed_ips') || '').trim();
+              const cidrPool = String(formData.get('cidr_pool') || '').trim();
+              const cidrApplyDns = !!formData.get('cidr_apply_dns');
+              const cidrApplyAddr = !!formData.get('cidr_apply_address');
+              const cidrApplyEp = !!formData.get('cidr_apply_endpoint');
               const mode = String(formData.get('peer_public_mode') || 'cloudflare').toLowerCase();
               const peerKey = String(formData.get('peer_public_key') || '').trim();
 
@@ -6304,6 +6377,10 @@ async function routerFetch(request, env, ctx) {
               s.wg_defaults.address = address || undefined;
               s.wg_defaults.dns = dns || undefined;
               s.wg_defaults.allowed_ips = allowed || undefined;
+              s.wg_defaults.cidr_pool = cidrPool || undefined;
+              s.wg_defaults.cidr_apply_dns = cidrApplyDns || false;
+              s.wg_defaults.cidr_apply_address = cidrApplyAddr || false;
+              s.wg_defaults.cidr_apply_endpoint = cidrApplyEp || false;
               s.wg_defaults.peer_public_key = peerKey || '';
 
               // Numeric fields
